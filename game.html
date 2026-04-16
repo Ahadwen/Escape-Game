@@ -107,6 +107,11 @@
       const TILE_COLS = Math.floor(TILE_W / BLOCK);
       const TILE_ROWS = Math.floor(VIEW_H / BLOCK);
 
+      // Heal orb: large + art; collision uses r (circle slightly larger than the cross).
+      const HEAL_PICKUP_HIT_R = 24;
+      const HEAL_PICKUP_PLUS_HALF = 13;
+      const HEAL_PICKUP_ARM_THICK = 6;
+
       let obstacles = []; // active obstacles for the currently cached 3 tiles
       let activeTileMinX = 0;
       let activeTileMaxX = VIEW_W; // set by ensureTilesForPlayer()
@@ -341,7 +346,8 @@
         snapshotPending: false,
         playerInvulnerableUntil: 0,
         playerTimelockUntil: 0,
-        timelockUltimateReadyAt: 0,
+        tempHp: 0,
+        tempHpExpiry: 0,
         screenShakeUntil: 0,
         screenShakeStrength: 0,
       };
@@ -530,7 +536,8 @@
         state.snapshotPending = false;
         state.playerInvulnerableUntil = 0;
         state.playerTimelockUntil = 0;
-        state.timelockUltimateReadyAt = 0;
+        state.tempHp = 0;
+        state.tempHpExpiry = 0;
         state.screenShakeUntil = 0;
         state.screenShakeStrength = 0;
         player.x = 96;
@@ -835,11 +842,13 @@
       }
 
       function spawnPickup() {
-        const point = randomOpenPoint(7);
+        const point = randomOpenPoint(HEAL_PICKUP_HIT_R);
         entities.pickups.push({
           x: point.x,
           y: point.y,
-          r: 7,
+          r: HEAL_PICKUP_HIT_R,
+          plusHalf: HEAL_PICKUP_PLUS_HALF,
+          plusThick: HEAL_PICKUP_ARM_THICK,
           expiresAt: state.elapsed + 6,
           life: 6,
           heal: 2,
@@ -891,16 +900,14 @@
       }
 
       function grantRandomAbility() {
-        const pool = ["shield", "burst", "timelock"];
-        let choices = pool;
-        if (state.elapsed < state.timelockUltimateReadyAt) {
-          choices = pool.filter((t) => t !== "timelock");
-        }
-        if (!choices.length) choices = pool;
-        const next = choices[Math.floor(Math.random() * choices.length)];
+        const pool = ["shield", "burst", "timelock", "heal"];
+        const prev = abilities.random.type;
+        const choices = pool.filter((t) => t !== prev);
+        const pickFrom = choices.length ? choices : pool;
+        const next = pickFrom[Math.floor(Math.random() * pickFrom.length)];
         abilities.random.type = next;
-        abilities.random.maxAmmo = 1;
-        abilities.random.ammo = 1;
+        abilities.random.maxAmmo = next === "timelock" ? 3 : 1;
+        abilities.random.ammo = abilities.random.maxAmmo;
         entities.shields = [];
       }
 
@@ -943,12 +950,17 @@
             }
           }
         } else if (ability.type === "timelock") {
-          state.timelockUltimateReadyAt = state.elapsed + 20;
-          state.playerInvulnerableUntil = Math.max(state.playerInvulnerableUntil, state.elapsed + 2);
-          state.playerTimelockUntil = state.elapsed + 2;
+          state.playerTimelockUntil = Math.max(state.playerTimelockUntil, state.elapsed + 2);
+          state.playerInvulnerableUntil = Math.max(state.playerInvulnerableUntil, state.elapsed + 3);
           spawnAttackRing(player.x, player.y, player.r + 24, "#c084fc", 0.3);
           spawnAttackRing(player.x, player.y, player.r + 46, "#e9d5ff", 0.36);
-          spawnUltimateEffect("timelock", player.x, player.y, "#c084fc", 2, 40);
+          spawnUltimateEffect("timelock", player.x, player.y, "#c084fc", 3, 40);
+        } else if (ability.type === "heal") {
+          state.tempHp = 2;
+          state.tempHpExpiry = state.elapsed + 20;
+          spawnAttackRing(player.x, player.y, player.r + 26, "#4ade80", 0.26);
+          spawnAttackRing(player.x, player.y, player.r + 44, "#bbf7d0", 0.32);
+          spawnUltimateEffect("healVitality", player.x, player.y, "#34d399", 0.5, 48);
         }
 
         ability.ammo -= 1;
@@ -1254,6 +1266,11 @@
         }
       }
 
+      function clearTempHp() {
+        state.tempHp = 0;
+        state.tempHpExpiry = 0;
+      }
+
       function hitDecoyIfAny(source, range) {
         for (let i = entities.decoys.length - 1; i >= 0; i--) {
           const d = entities.decoys[i];
@@ -1271,7 +1288,15 @@
       function damagePlayer(amount) {
         if (!state.running) return;
         if (state.elapsed < state.playerInvulnerableUntil) return;
-        player.hp = Math.max(0, player.hp - amount);
+        if (amount <= 0) return;
+        let rem = amount;
+        if (state.tempHp > 0) {
+          const absorbed = Math.min(rem, state.tempHp);
+          state.tempHp -= absorbed;
+          rem -= absorbed;
+          if (state.tempHp <= 0) clearTempHp();
+        }
+        if (rem > 0) player.hp = Math.max(0, player.hp - rem);
         state.hurtFlash = 0.16;
         state.playerInvulnerableUntil = state.elapsed + 0.35;
         state.screenShakeUntil = state.elapsed + 0.18;
@@ -1369,6 +1394,7 @@
           }
           const rr = p.r + player.r;
           if (distSq(p, player) <= rr * rr) {
+            clearTempHp();
             player.hp = Math.min(player.maxHp, player.hp + p.heal);
             // Heal pickup slightly refreshes ability cooldowns.
             const refreshFactor = 0.8; // 20% shorter remaining cooldown
@@ -1454,6 +1480,7 @@
         state.hurtFlash = Math.max(0, state.hurtFlash - dt);
         state.screenShakeStrength = Math.max(0, state.screenShakeStrength - dt * 30);
         if (state.elapsed >= state.playerTimelockUntil) state.playerTimelockUntil = 0;
+        if (state.tempHp > 0 && state.tempHpExpiry > 0 && state.elapsed >= state.tempHpExpiry) clearTempHp();
 
         cameraOffset += cameraPanDir * CAMERA_PAN_SPEED * dt;
         // Ensure procedural tiles + obstacle cache are valid for the player.
@@ -1534,6 +1561,35 @@
         ctx.restore();
       }
 
+      function drawHealPickup(p) {
+        const pulse = 0.94 + 0.06 * (0.5 + 0.5 * Math.sin(state.elapsed * 5));
+        const h = (p.plusHalf ?? HEAL_PICKUP_PLUS_HALF) * pulse;
+        const t = p.plusThick ?? HEAL_PICKUP_ARM_THICK;
+        const { x, y } = p;
+        ctx.save();
+        ctx.translate(x, y);
+        ctx.shadowColor = "rgba(52, 211, 153, 0.95)";
+        ctx.shadowBlur = 20;
+        ctx.fillStyle = "#047857";
+        ctx.fillRect(-h, -t / 2, 2 * h, t);
+        ctx.fillRect(-t / 2, -h, t, 2 * h);
+        ctx.shadowBlur = 12;
+        ctx.fillStyle = "#10b981";
+        ctx.fillRect(-h + 0.8, -t / 2 + 0.5, 2 * h - 1.6, t - 1);
+        ctx.fillRect(-t / 2 + 0.5, -h + 0.8, t - 1, 2 * h - 1.6);
+        ctx.shadowBlur = 0;
+        ctx.globalAlpha = 0.9;
+        ctx.fillStyle = "#d1fae5";
+        ctx.fillRect(-h * 0.52, -t * 0.32, h * 1.04, t * 0.64);
+        ctx.fillRect(-t * 0.32, -h * 0.52, t * 0.64, h * 1.04);
+        ctx.globalAlpha = 1;
+        ctx.strokeStyle = "rgba(236, 253, 245, 0.55)";
+        ctx.lineWidth = 1.5;
+        ctx.strokeRect(-h, -t / 2, 2 * h, t);
+        ctx.strokeRect(-t / 2, -h, t, 2 * h);
+        ctx.restore();
+      }
+
       function drawObstacles() {
         ctx.fillStyle = "#334155";
         ctx.strokeStyle = "#94a3b8";
@@ -1551,7 +1607,11 @@
         ctx.fillText("Best: " + state.bestSurvival.toFixed(1) + "s", 14, 42);
         ctx.fillText("Wave: " + state.wave, 14, 62);
         ctx.fillText("Hunters: " + entities.hunters.length, 14, 82);
-        ctx.fillText("HP: " + player.hp + "/" + player.maxHp, 14, 102);
+        ctx.fillText(
+          "HP: " + player.hp + "/" + player.maxHp + (state.tempHp > 0 ? "  +" + state.tempHp + " temp" : ""),
+          14,
+          102
+        );
 
         ctx.fillStyle = "#cbd5e1";
         ctx.fillText("Q Dash " + cdr(abilities.dash).toFixed(1), 560, 22);
@@ -1584,16 +1644,16 @@
         drawObstacles();
 
         for (const p of entities.pickups) {
-          drawCircle(p.x, p.y, p.r, "#34d399");
+          drawHealPickup(p);
           const lifeLeft = clamp((p.expiresAt - state.elapsed) / (p.life || 0.001), 0, 1);
-          const barW = 28;
+          const barW = 34;
           const barH = 4;
-          const x = p.x - barW / 2;
-          const y = p.y + p.r + 6;
+          const bx = p.x - barW / 2;
+          const by = p.y + (p.plusHalf ?? HEAL_PICKUP_PLUS_HALF) + 12;
           ctx.fillStyle = "rgba(148, 163, 184, 0.32)";
-          ctx.fillRect(x, y, barW, barH);
+          ctx.fillRect(bx, by, barW, barH);
           ctx.fillStyle = lifeLeft > 0.35 ? "#22c55e" : "#ef4444";
-          ctx.fillRect(x, y, barW * lifeLeft, barH);
+          ctx.fillRect(bx, by, barW * lifeLeft, barH);
         }
         for (const d of entities.decoys) drawCircle(d.x, d.y, d.r, "#a78bfa", 0.65);
 
@@ -1644,6 +1704,15 @@
             drawCircle(fx.x, fx.y, rr, fx.color, 0.08);
             ctx.strokeStyle = `rgba(192, 132, 252, ${0.32 + 0.18 * pulse})`;
             ctx.lineWidth = 4 + pulse * 3;
+            ctx.beginPath();
+            ctx.arc(fx.x, fx.y, rr, 0, TAU);
+            ctx.stroke();
+          } else if (fx.type === "healVitality") {
+            const pulse = 0.75 + 0.25 * (0.5 + 0.5 * Math.sin(state.elapsed * 14));
+            const rr = fx.radius * (0.4 + t * 0.75);
+            drawCircle(fx.x, fx.y, rr, fx.color, 0.12 * (1 - t));
+            ctx.strokeStyle = `rgba(52, 211, 153, ${0.55 * (1 - t)})`;
+            ctx.lineWidth = 5 - t * 2.5;
             ctx.beginPath();
             ctx.arc(fx.x, fx.y, rr, 0, TAU);
             ctx.stroke();
@@ -1783,6 +1852,13 @@
           ctx.lineWidth = 3 + timePulse * 2;
           ctx.beginPath();
           ctx.arc(player.x, player.y, player.r + 14 + timePulse * 5, 0, TAU);
+          ctx.stroke();
+        } else if (state.tempHp > 0) {
+          const p = 0.55 + 0.45 * (0.5 + 0.5 * Math.sin(state.elapsed * 10));
+          ctx.strokeStyle = `rgba(52, 211, 153, ${0.35 + 0.25 * p})`;
+          ctx.lineWidth = 2.5;
+          ctx.beginPath();
+          ctx.arc(player.x, player.y, player.r + 7 + p * 3, 0, TAU);
           ctx.stroke();
         }
         for (const ripple of entities.damageRipples) {
