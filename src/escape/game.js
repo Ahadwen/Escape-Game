@@ -998,17 +998,91 @@ function startGameWithCharacter(id) {
   resetGame();
 }
 
+function characterTutorialHtml(id) {
+  const k = CHARACTERS.knight.abilities;
+  const r = CHARACTERS.rogue.abilities;
+  if (id === "knight") {
+    return `
+      <p class="character-detail-lead">Sturdy starter: higher HP and a straightforward kit for learning waves and the map.</p>
+      <ul>
+        <li><strong>${k.dash.key.toUpperCase()} — ${k.dash.label}:</strong> quick reposition through (most) obstacles.</li>
+        <li><strong>${k.burst.key.toUpperCase()} — ${k.burst.label}:</strong> speed burst that shoves nearby hunters. With the <strong>Clubs 3-card set</strong>, you can walk through walls for the burst duration—if it ends inside a wall, you are pushed to the nearest open spot.</li>
+        <li><strong>${k.decoy.key.toUpperCase()} — ${k.decoy.label}:</strong> drops a decoy to pull enemies off you.</li>
+        <li><strong>${k.random.key.toUpperCase()} — ${k.random.label}:</strong> random ultimate (ammo on the bar).</li>
+      </ul>
+      <p class="character-detail-lead" style="margin-top:10px">Grab heal orbs and suit cards—passives stack. Pause: Space · After death, restart: R.</p>
+    `;
+  }
+  if (id === "rogue") {
+    return `
+      <p class="character-detail-lead">Glass cannon: <strong>${CHARACTERS.rogue.baseHp} HP</strong>. <strong>Hunger</strong> always ticks down—at <strong>0</strong> you lose. Pick up <strong>food</strong> (orange orbs); eating sets hunger to at least <strong>${ROGUE_FOOD_HUNGER_RESTORE}s</strong> (not a full refill). You move faster when hunger is very low.</p>
+      <ul>
+        <li><strong>${r.dash.key.toUpperCase()} — ${r.dash.label}:</strong> hold to aim your dash, release to go. (Diamonds 3-set: longer dash and larger smoke.)</li>
+        <li><strong>${r.burst.key.toUpperCase()} — ${r.burst.label}:</strong> deploys a smoke zone. You can <strong>stealth</strong> while hugging nearby terrain or inside smoke; hunter line-of-sight and sniper rules differ from the Knight.</li>
+        <li><strong>${r.decoy.key.toUpperCase()} — ${r.decoy.label}:</strong> briefly highlights food with on-screen arrows; use it when you are starving.</li>
+        <li><strong>${r.random.key.toUpperCase()} — ${r.random.label}:</strong> random ultimate charges, same control idea as the Knight.</li>
+      </ul>
+      <p class="character-detail-lead" style="margin-top:10px">The top-left <strong>Fed</strong> bar and the arcs around your hero show hunger and stealth grace. Pause: Space · Restart: R.</p>
+    `;
+  }
+  return "";
+}
+
 function wireCharacterSelect() {
   if (!characterSelectModal || !characterSelectOptions?.length) {
     startGameWithCharacter("knight");
     return;
   }
-  characterSelectModal.classList.add("open");
-  for (const btn of characterSelectOptions) {
-    btn.addEventListener("click", () => {
-      const id = btn.dataset.characterId || "knight";
+
+  const pick = characterSelectModal.querySelector("#character-select-pick");
+  const confirm = characterSelectModal.querySelector("#character-select-confirm");
+  const detailEl = characterSelectModal.querySelector("#character-detail");
+  const confirmBtn = characterSelectModal.querySelector("#character-confirm-button");
+  const backBtn = characterSelectModal.querySelector("#character-back-button");
+  const titleEl = characterSelectModal.querySelector("#character-confirm-title");
+
+  let pendingCharacterId = null;
+
+  function showPick() {
+    pendingCharacterId = null;
+    if (pick) pick.hidden = false;
+    if (confirm) confirm.hidden = true;
+  }
+
+  function showConfirm(id) {
+    const ch = CHARACTERS[id];
+    if (!ch) return;
+    if (!pick || !confirm || !detailEl || !titleEl) {
       startGameWithCharacter(id);
+      return;
+    }
+    pendingCharacterId = id;
+    titleEl.textContent = `Confirm — ${ch.name}`;
+    detailEl.innerHTML = characterTutorialHtml(id);
+    pick.hidden = true;
+    confirm.hidden = false;
+    if (confirmBtn) confirmBtn.focus();
+  }
+
+  characterSelectModal.classList.add("open");
+
+  if (pick && confirm && detailEl && titleEl && confirmBtn && backBtn) {
+    showPick();
+    for (const btn of characterSelectOptions) {
+      btn.addEventListener("click", () => {
+        showConfirm(btn.dataset.characterId || "knight");
+      });
+    }
+    confirmBtn.addEventListener("click", () => {
+      if (pendingCharacterId) startGameWithCharacter(pendingCharacterId);
     });
+    backBtn.addEventListener("click", showPick);
+  } else {
+    for (const btn of characterSelectOptions) {
+      btn.addEventListener("click", () => {
+        startGameWithCharacter(btn.dataset.characterId || "knight");
+      });
+    }
   }
 }
 

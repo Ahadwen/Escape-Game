@@ -381,7 +381,9 @@
       }
 
       .character-select-inner {
-        width: min(92vw, 500px);
+        width: min(92vw, 560px);
+        max-height: min(88vh, 720px);
+        overflow: auto;
         border-radius: 14px;
         border: 1px solid #64748b;
         background: linear-gradient(180deg, #111827, #0b1220);
@@ -419,6 +421,76 @@
         margin: 0;
         color: #93c5fd;
         font-size: 12px;
+      }
+
+      .character-confirm-title {
+        margin: 0 0 10px;
+        font-size: 20px;
+        color: #e2e8f0;
+      }
+
+      .character-detail {
+        margin: 0 0 14px;
+        color: #cbd5e1;
+        font-size: 13px;
+        line-height: 1.45;
+      }
+
+      .character-detail-lead {
+        margin: 0 0 10px;
+        color: #94a3b8;
+        font-size: 12px;
+      }
+
+      .character-detail ul {
+        margin: 0;
+        padding-left: 1.15rem;
+      }
+
+      .character-detail li {
+        margin-bottom: 6px;
+      }
+
+      .character-detail strong {
+        color: #f8fafc;
+      }
+
+      .character-confirm-actions {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 10px;
+        justify-content: flex-end;
+        margin-top: 4px;
+      }
+
+      .character-primary-btn,
+      .character-secondary-btn {
+        padding: 10px 18px;
+        border-radius: 10px;
+        font-size: 14px;
+        font-weight: 600;
+        cursor: pointer;
+        border: 1px solid transparent;
+      }
+
+      .character-primary-btn {
+        background: linear-gradient(180deg, #22c55e, #15803d);
+        color: #f0fdf4;
+        border-color: #166534;
+      }
+
+      .character-primary-btn:hover {
+        filter: brightness(1.06);
+      }
+
+      .character-secondary-btn {
+        background: rgba(30, 41, 59, 0.9);
+        color: #e2e8f0;
+        border-color: #475569;
+      }
+
+      .character-secondary-btn:hover {
+        background: rgba(51, 65, 85, 0.95);
       }
     </style>
   </head>
@@ -495,15 +567,27 @@
     <div id="character-select-modal" class="character-select-modal" aria-label="Character select" aria-live="polite">
       <div class="character-select-inner">
         <h2 class="character-select-title">Choose Character</h2>
-        <p class="character-select-sub">More characters coming soon.</p>
-        <button type="button" class="character-option" data-character-id="knight">
-          <span class="title">Knight</span>
-          <span class="meta">Base HP: 10 · Q Dash · W Burst · E Decoy</span>
-        </button>
-        <button type="button" class="character-option" data-character-id="rogue" style="margin-top: 10px">
-          <span class="title">Hungry Rogue</span>
-          <span class="meta">Base HP: 7 · Q Dash · W Smoke Bomb · E Consume</span>
-        </button>
+        <p class="character-select-sub">Select a hero to see their full kit, then confirm to start.</p>
+
+        <div id="character-select-pick">
+          <button type="button" class="character-option" data-character-id="knight">
+            <span class="title">Knight</span>
+            <span class="meta">Balanced · 10 HP · classic kit</span>
+          </button>
+          <button type="button" class="character-option" data-character-id="rogue" style="margin-top: 10px">
+            <span class="title">Hungry Rogue</span>
+            <span class="meta">High risk · hunger · stealth &amp; smoke</span>
+          </button>
+        </div>
+
+        <div id="character-select-confirm" hidden>
+          <h3 id="character-confirm-title" class="character-confirm-title"></h3>
+          <div id="character-detail" class="character-detail"></div>
+          <div class="character-confirm-actions">
+            <button type="button" id="character-back-button" class="character-secondary-btn">Back</button>
+            <button type="button" id="character-confirm-button" class="character-primary-btn">Confirm</button>
+          </div>
+        </div>
       </div>
     </div>
     <div id="card-modal" class="card-modal" aria-live="polite" aria-label="Card pickup">
