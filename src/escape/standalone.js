@@ -240,6 +240,7 @@
     canvas,
     snapshotFolderButton,
     snapshotStatus,
+    controlsHintEl,
     characterSelectModal,
     characterSelectOptions,
     abilitySlots,
@@ -254,6 +255,18 @@
     cardSkipButton,
     cardSwapRow
   }) {
+    const deathSnapshotsEnabled = (() => {
+      try {
+        const h = window.location.hostname;
+        return h === "localhost" || h === "127.0.0.1" || h === "[::1]";
+      } catch {
+        return false;
+      }
+    })();
+    if (!deathSnapshotsEnabled) {
+      const meta = snapshotFolderButton?.closest(".meta");
+      if (meta) meta.hidden = true;
+    }
     const ctx = canvas.getContext("2d");
     const world = { w: canvas.width, h: canvas.height };
     const postFxCanvas = document.createElement("canvas");
@@ -1112,6 +1125,16 @@
       abilities = makeAbilitiesForCharacter(selectedCharacter);
       passive.cooldownFlat = makeCooldownFlatForCharacter(selectedCharacter);
       passive.cooldownPct = makeCooldownPctForCharacter(selectedCharacter);
+      refreshControlsHint();
+    }
+    function formatControlsHintLine() {
+      if (selectedCharacter.id === "rogue") {
+        return "Move: Arrows | Abilities: Q dash, W smoke bomb, E point to food | Pause: Space | Restart: R";
+      }
+      return "Move: Arrows | Abilities: Q dash, W speed burst, E decoy | Pause: Space | Restart: R";
+    }
+    function refreshControlsHint() {
+      if (controlsHintEl) controlsHintEl.textContent = formatControlsHintLine();
     }
     function startGameWithCharacter(id) {
       selectCharacter(id);
@@ -1122,13 +1145,9 @@
     function characterTutorialHtml(id) {
       const k = CHARACTERS.knight.abilities;
       const r = CHARACTERS.rogue.abilities;
-      const stock = `
-    <p class="character-detail-lead"><strong>Hit points</strong> \u2014 damage chips away at your life; at zero the run ends. <strong>Items</strong> \u2014 pickups on the map make you stronger over time; grab what you find and get a feel for how they shift your tempo. <strong>Health crystals</strong> \u2014 restore HP when you need breathing room.</p>
-  `;
       if (id === "knight") {
         return `
-      ${stock}
-      <p class="character-detail-lead" style="margin-top:12px">The <strong>Knight</strong> is a sturdy all-rounder: forgiving HP and a simple rhythm for learning waves, spacing, and how the arena moves.</p>
+      <p class="character-detail-lead">The <strong>Knight</strong> is a sturdy all-rounder: forgiving HP and a simple rhythm for learning waves, spacing, and how the arena moves.</p>
       <ul>
         <li><strong>Q \u2014 ${k.dash.label}:</strong> quick dart through gaps to slip out of pressure.</li>
         <li><strong>W \u2014 ${k.burst.label}:</strong> short speed surge that shoves hunters aside\u2014break chokes or sprint to safety.</li>
@@ -1139,8 +1158,7 @@
       }
       if (id === "rogue") {
         return `
-      ${stock}
-      <p class="character-detail-lead" style="margin-top:12px">The <strong>Hungry Rogue</strong> is always hungry and dies if he is not fed. Chase food across the arena to stay alive.</p>
+      <p class="character-detail-lead">The <strong>Hungry Rogue</strong> is always hungry and dies if he is not fed. Chase food across the arena to stay alive.</p>
       <ul>
         <li><strong>Passive:</strong> when you break line of sight on pursuers, you can enter stealth. Hug a wall while stealthed and you can stay hidden even across open sightlines\u2014use corners and cover to slip past danger.</li>
         <li><strong>Q \u2014 ${r.dash.label}:</strong> hold to aim a direction, release to snap forward in a quick dash\u2014your main burst of movement to dodge shots, round corners, or close distance.</li>
@@ -1159,6 +1177,7 @@
       }
       const pick = characterSelectModal.querySelector("#character-select-pick");
       const confirm = characterSelectModal.querySelector("#character-select-confirm");
+      const stockEl = characterSelectModal.querySelector("#character-select-stock");
       const detailEl = characterSelectModal.querySelector("#character-detail");
       const confirmBtn = characterSelectModal.querySelector("#character-confirm-button");
       const backBtn = characterSelectModal.querySelector("#character-back-button");
@@ -1168,6 +1187,7 @@
         pendingCharacterId = null;
         if (pick) pick.hidden = false;
         if (confirm) confirm.hidden = true;
+        if (stockEl) stockEl.hidden = false;
       }
       function showConfirm(id) {
         const ch = CHARACTERS[id];
@@ -1181,6 +1201,7 @@
         detailEl.innerHTML = characterTutorialHtml(id);
         pick.hidden = true;
         confirm.hidden = false;
+        if (stockEl) stockEl.hidden = true;
         if (confirmBtn) confirmBtn.focus();
       }
       characterSelectModal.classList.add("open");
@@ -1521,6 +1542,7 @@
       });
     }
     function setSnapshotStatus(text) {
+      if (!deathSnapshotsEnabled || !snapshotStatus) return;
       snapshotStatus.textContent = text;
     }
     function makeSnapshotFilename() {
@@ -1533,6 +1555,7 @@
       });
     }
     async function chooseSnapshotFolder() {
+      if (!deathSnapshotsEnabled) return;
       if (!window.showDirectoryPicker) {
         setSnapshotStatus("Death screenshots: browser folder access unavailable, using downloads");
         return;
@@ -1545,6 +1568,7 @@
       }
     }
     async function saveDeathSnapshot() {
+      if (!deathSnapshotsEnabled) return;
       const blob = await makeSnapshotBlob();
       if (!blob) return;
       const filename = makeSnapshotFilename();
@@ -2408,7 +2432,7 @@
       }
       if (player.hp <= 0) {
         state.deathCount += 1;
-        state.snapshotPending = true;
+        if (deathSnapshotsEnabled) state.snapshotPending = true;
         state.running = false;
         state.deathStartedAtMs = state.lastTime;
         state.bestSurvival = Math.max(state.bestSurvival, state.elapsed);
@@ -3515,9 +3539,11 @@
       if (key.startsWith("arrow")) state.keys.delete(key);
       if (key === abilities.dash.key) releaseRogueDashAim();
     });
-    snapshotFolderButton.addEventListener("click", () => {
-      chooseSnapshotFolder();
-    });
+    if (snapshotFolderButton) {
+      snapshotFolderButton.addEventListener("click", () => {
+        chooseSnapshotFolder();
+      });
+    }
     if (cardPickupButton) {
       cardPickupButton.addEventListener("click", () => continueAfterLoadout());
     }
@@ -3528,6 +3554,7 @@
       cardCloseButton.addEventListener("click", () => continueAfterLoadout());
     }
     wireCharacterSelect();
+    refreshControlsHint();
     requestAnimationFrame(loop);
   }
 
@@ -3536,6 +3563,7 @@
     canvas: document.getElementById("game"),
     snapshotFolderButton: document.getElementById("snapshot-folder-button"),
     snapshotStatus: document.getElementById("snapshot-status"),
+    controlsHintEl: document.getElementById("game-controls-hint"),
     characterSelectModal: document.getElementById("character-select-modal"),
     characterSelectOptions: Array.from(document.querySelectorAll("[data-character-id]")),
     abilitySlots: Array.from(document.querySelectorAll(".ability-slot")),

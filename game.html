@@ -401,6 +401,14 @@
         font-size: 13px;
       }
 
+      .character-select-stock {
+        margin: 0 0 14px;
+      }
+
+      .character-select-stock .character-detail-lead {
+        margin-bottom: 0;
+      }
+
       .character-option {
         width: 100%;
         text-align: left;
@@ -558,7 +566,7 @@
           </div>
         </div>
       </div>
-      <p class="controls">Move: Arrows | Abilities: Q dash, W speed burst, E decoy | Pause: Space | Restart: R</p>
+      <p id="game-controls-hint" class="controls">Move: Arrows | Abilities: Q dash, W speed burst, E decoy | Pause: Space | Restart: R</p>
       <div class="meta">
         <button id="snapshot-folder-button" type="button">Choose Snapshot Folder</button>
         <span id="snapshot-status">Death screenshots: download fallback active</span>
@@ -568,6 +576,14 @@
       <div class="character-select-inner">
         <h2 class="character-select-title">Choose Character</h2>
         <p class="character-select-sub">Select a hero to see their full kit, then confirm to start.</p>
+
+        <div id="character-select-stock" class="character-select-stock character-detail" aria-label="Core rules">
+          <p class="character-detail-lead">
+            <strong>Hit points</strong> — damage chips away at your life; at zero the run ends.
+            <strong>Items</strong> — pickups on the map make you stronger over time; grab what you find and get a feel for how they shift your tempo.
+            <strong>Health crystals</strong> — restore HP when you need breathing room.
+          </p>
+        </div>
 
         <div id="character-select-pick">
           <button type="button" class="character-option" data-character-id="knight">

@@ -4,6 +4,7 @@ mountEscape({
   canvas: document.getElementById("game"),
   snapshotFolderButton: document.getElementById("snapshot-folder-button"),
   snapshotStatus: document.getElementById("snapshot-status"),
+  controlsHintEl: document.getElementById("game-controls-hint"),
   characterSelectModal: document.getElementById("character-select-modal"),
   characterSelectOptions: Array.from(document.querySelectorAll("[data-character-id]")),
   abilitySlots: Array.from(document.querySelectorAll(".ability-slot")),
