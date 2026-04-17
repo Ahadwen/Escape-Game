@@ -365,6 +365,61 @@
         padding: 8px 10px;
         min-height: 18px;
       }
+
+      .character-select-modal {
+        position: fixed;
+        inset: 0;
+        display: none;
+        align-items: center;
+        justify-content: center;
+        background: rgba(2, 6, 23, 0.84);
+        z-index: 60;
+      }
+
+      .character-select-modal.open {
+        display: flex;
+      }
+
+      .character-select-inner {
+        width: min(92vw, 500px);
+        border-radius: 14px;
+        border: 1px solid #64748b;
+        background: linear-gradient(180deg, #111827, #0b1220);
+        padding: 18px;
+      }
+
+      .character-select-title {
+        margin: 0 0 8px;
+        font-size: 24px;
+      }
+
+      .character-select-sub {
+        margin: 0 0 14px;
+        color: #94a3b8;
+        font-size: 13px;
+      }
+
+      .character-option {
+        width: 100%;
+        text-align: left;
+        padding: 12px;
+        border-radius: 10px;
+        border: 1px solid #475569;
+        background: linear-gradient(160deg, #1f2937, #111827);
+      }
+
+      .character-option .title {
+        display: block;
+        font-size: 16px;
+        font-weight: 700;
+        margin-bottom: 4px;
+      }
+
+      .character-option .meta {
+        margin: 0;
+        color: #93c5fd;
+        font-size: 12px;
+      }
     </style>
   </head>
   <body>
@@ -437,6 +492,20 @@
         <span id="snapshot-status">Death screenshots: download fallback active</span>
       </div>
     </main>
+    <div id="character-select-modal" class="character-select-modal" aria-label="Character select" aria-live="polite">
+      <div class="character-select-inner">
+        <h2 class="character-select-title">Choose Character</h2>
+        <p class="character-select-sub">More characters coming soon.</p>
+        <button type="button" class="character-option" data-character-id="knight">
+          <span class="title">Knight</span>
+          <span class="meta">Base HP: 10 · Q Dash · W Burst · E Decoy</span>
+        </button>
+        <button type="button" class="character-option" data-character-id="rogue" style="margin-top: 10px">
+          <span class="title">Hungry Rogue</span>
+          <span class="meta">Base HP: 7 · Q Dash · W Smoke Bomb · E Consume</span>
+        </button>
+      </div>
+    </div>
     <div id="card-modal" class="card-modal" aria-live="polite" aria-label="Card pickup">
       <div class="card-modal-inner">
         <div class="card-modal-header">

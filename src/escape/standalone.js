@@ -240,6 +240,8 @@
     canvas,
     snapshotFolderButton,
     snapshotStatus,
+    characterSelectModal,
+    characterSelectOptions,
     abilitySlots,
     cardSlotEls,
     backpackSlotEl,
@@ -266,7 +268,35 @@
     const CARD_SPAWN_INTERVAL = 8.5;
     const LOOT_DENSITY_BASE_ACTIVE_HEXES = 3;
     const TERRAIN_SPEED_BOOST_LINGER = 0.16;
+    const ROGUE_STEALTH_AFTER_LOS_BREAK = 0.35;
+    const ROGUE_STEALTH_OPEN_GRACE = 0.4;
     const CAMERA_FOLLOW_LERP = 0.18;
+    const CHARACTERS = {
+      knight: {
+        id: "knight",
+        name: "Knight",
+        baseHp: 10,
+        cooldownAbilityIds: ["dash", "burst", "decoy"],
+        abilities: {
+          dash: { key: "q", label: "Dash", cooldown: 2.2, minCooldown: 0.25 },
+          burst: { key: "w", label: "Burst", cooldown: 5, minCooldown: 0.4, duration: 3 },
+          decoy: { key: "e", label: "Decoy", cooldown: 8, minCooldown: 0.4 },
+          random: { key: "r", label: "Ultimate" }
+        }
+      },
+      rogue: {
+        id: "rogue",
+        name: "Hungry Rogue",
+        baseHp: 7,
+        cooldownAbilityIds: ["dash", "burst"],
+        abilities: {
+          dash: { key: "q", label: "Dash", cooldown: 2.2, minCooldown: 0.25 },
+          burst: { key: "w", label: "Smoke", cooldown: 16, minCooldown: 1, duration: 3 },
+          decoy: { key: "e", label: "Consume", cooldown: 4, minCooldown: 0.5 },
+          random: { key: "r", label: "Ultimate" }
+        }
+      }
+    };
     let obstacles = [];
     let activePlayerHex = { q: 0, r: 0 };
     let activeHexes = [];
@@ -392,15 +422,42 @@
       pendingCard: null,
       setBonusChoicePendingSuit: null,
       setBonusChoiceCard: null,
-      playerHeadstartUntil: 0
+      playerHeadstartUntil: 0,
+      rogueHunger: 60,
+      rogueHungerMax: 60,
+      rogueLastSeenAt: 0,
+      rogueAlertUntil: 0,
+      rogueStealthActive: false,
+      rogueStealthOpenUntil: 0,
+      rogueHasEnemyLos: false,
+      rogueDashAiming: false,
+      rogueFoodSenseUntil: 0,
+      rogueNextFoodAt: 0,
+      rogueNextHungryPopupAt: 0,
+      rogueLastKnownPlayerPos: { x: 96, y: 340 }
     };
     let snapshotDirectoryHandle = null;
-    const abilities = {
-      dash: { key: "q", cooldown: 2.2, nextReadyAt: 0 },
-      burst: { key: "w", cooldown: 5, nextReadyAt: 0, duration: 3 },
-      decoy: { key: "e", cooldown: 8, nextReadyAt: 0 },
-      random: { key: "r", type: null, ammo: 0, maxAmmo: 0 }
-    };
+    let selectedCharacter = CHARACTERS.knight;
+    function makeAbilitiesForCharacter(character) {
+      const spec = character.abilities;
+      return {
+        dash: { ...spec.dash, nextReadyAt: 0 },
+        burst: { ...spec.burst, nextReadyAt: 0 },
+        decoy: { ...spec.decoy, nextReadyAt: 0 },
+        random: { ...spec.random, type: null, ammo: 0, maxAmmo: 0 }
+      };
+    }
+    function makeCooldownFlatForCharacter(character) {
+      const out = {};
+      for (const id of character.cooldownAbilityIds) out[id] = 0;
+      return out;
+    }
+    function makeCooldownPctForCharacter(character) {
+      const out = {};
+      for (const id of character.cooldownAbilityIds) out[id] = 0;
+      return out;
+    }
+    let abilities = makeAbilitiesForCharacter(selectedCharacter);
     const entities = {
       hunters: [],
       pickups: [],
@@ -414,24 +471,28 @@
       damageRipples: [],
       ultimateEffects: [],
       cards: [],
-      healPopups: []
+      healPopups: [],
+      smokeZones: [],
+      foods: []
     };
     const inventory = {
       cards: [],
       backpackCard: null,
       diamondEmpower: null,
       heartsRegenPerSec: 0,
-      spadesUltSlowUntil: 0,
+      spadesLandingStealthUntil: 0,
       spadesObstacleBoostUntil: 0,
       clubsInvisUntil: 0,
       clubsPhaseThroughTerrain: false,
       heartsResistanceReadyAt: 0,
       heartsResistanceCooldownDuration: 0,
       heartsRegenBank: 0,
-      dodgeTextUntil: 0
+      dodgeTextUntil: 0,
+      rogueDiamondRangeBoost: false
     };
     const passive = {
-      cooldownFlat: { dash: 0, burst: 0, decoy: 0 },
+      cooldownFlat: makeCooldownFlatForCharacter(selectedCharacter),
+      cooldownPct: makeCooldownPctForCharacter(selectedCharacter),
       speedMult: 1,
       obstacleTouchMult: 1,
       dodgeChanceWhenDashCd: 0,
@@ -446,6 +507,7 @@
       nextRechargeAt: 0
     };
     const suitGlyph = { diamonds: "\u2666", hearts: "\u2665", clubs: "\u2663", spades: "\u2660" };
+    let gameStarted = false;
     function cardRankText(rank) {
       if (rank === 1) return "A";
       if (rank === 11) return "J";
@@ -464,10 +526,27 @@
       const suits = ["diamonds", "hearts", "clubs", "spades"];
       return suits[Math.floor(Math.random() * suits.length)];
     }
+    function rogueDiamondCooldownPctForRank(rank) {
+      if (rank <= 2) return 0.05;
+      if (rank <= 4) return 0.08;
+      if (rank === 5) return 0.1;
+      if (rank <= 8) return 0.12;
+      if (rank <= 10) return 0.15;
+      if (rank === 11) return 0.18;
+      if (rank === 12) return 0.22;
+      return 0.25;
+    }
+    function abilityLabelById(id) {
+      return selectedCharacter.abilities[id]?.label ?? id;
+    }
     function makeCardEffect(suit, rank) {
       if (suit === "diamonds") {
-        const abilityPool = ["dash", "burst", "decoy"];
-        return { kind: "cooldown", target: abilityPool[Math.floor(Math.random() * abilityPool.length)], value: 0.1 * rank };
+        const abilityPool = selectedCharacter.cooldownAbilityIds;
+        const target = abilityPool[Math.floor(Math.random() * abilityPool.length)];
+        if (selectedCharacter.id === "rogue") {
+          return { kind: "cooldownPct", target, value: rogueDiamondCooldownPctForRank(rank) };
+        }
+        return { kind: "cooldown", target, value: 0.1 * rank };
       }
       if (suit === "hearts") {
         if (rank >= 11) return { kind: "frontShield", arc: 28 + rank * 4 };
@@ -482,8 +561,8 @@
         return { kind: "invisBurst", value: 0.1 * rank };
       }
       if (rank >= 11) return { kind: "dashCharge", value: 1 };
-      if (Math.random() < 0.5) return { kind: "speed", value: Math.min(0.25, 0.025 * rank) };
-      return { kind: "terrainBoost", value: Math.min(0.25, 0.025 * rank) };
+      if (Math.random() < 0.5) return { kind: "speed", value: Math.min(0.18, 0.018 * rank) };
+      return { kind: "terrainBoost", value: Math.min(0.36, 0.036 * rank) };
     }
     function rollCardRankWeighted() {
       const minW = 0.2;
@@ -511,7 +590,8 @@
     }
     function describeCardEffect(card) {
       const e = card.effect;
-      if (e.kind === "cooldown") return `-${e.value.toFixed(1)}s ${e.target} cooldown`;
+      if (e.kind === "cooldown") return `-${e.value.toFixed(1)}s ${abilityLabelById(e.target)} cooldown`;
+      if (e.kind === "cooldownPct") return `-${Math.round(e.value * 100)}% ${abilityLabelById(e.target)} cooldown`;
       if (e.kind === "maxHp") return `+${e.value} max HP`;
       if (e.kind === "hitResist") return `Block one hit every ${e.cooldown.toFixed(1)}s`;
       if (e.kind === "frontShield") return `Front shield arc +${Math.round(e.arc)}deg`;
@@ -547,7 +627,8 @@
       }
     }
     function recalcCardPassives() {
-      passive.cooldownFlat = { dash: 0, burst: 0, decoy: 0 };
+      passive.cooldownFlat = makeCooldownFlatForCharacter(selectedCharacter);
+      passive.cooldownPct = makeCooldownPctForCharacter(selectedCharacter);
       passive.speedMult = 1;
       passive.obstacleTouchMult = 1;
       passive.dodgeChanceWhenDashCd = 0;
@@ -557,12 +638,14 @@
       passive.heartsShieldArc = 0;
       inventory.heartsRegenPerSec = 0;
       inventory.clubsPhaseThroughTerrain = false;
+      inventory.rogueDiamondRangeBoost = false;
       let maxHpBonus = 0;
       const suits = { diamonds: 0, hearts: 0, clubs: 0, spades: 0 };
       for (const card of inventory.cards) {
         suits[card.suit] += 1;
         const e = card.effect;
         if (e.kind === "cooldown") passive.cooldownFlat[e.target] += e.value;
+        else if (e.kind === "cooldownPct") passive.cooldownPct[e.target] += e.value;
         else if (e.kind === "maxHp") maxHpBonus += e.value;
         else if (e.kind === "dodge") passive.dodgeChanceWhenDashCd += e.value;
         else if (e.kind === "stun") passive.stunOnHitSecs += e.value;
@@ -574,17 +657,23 @@
       }
       if (suits.hearts >= 3) inventory.heartsRegenPerSec = 0.3;
       if (suits.clubs >= 3) inventory.clubsPhaseThroughTerrain = true;
+      if (selectedCharacter.id === "rogue" && suits.diamonds >= 3) inventory.rogueDiamondRangeBoost = true;
       if (suits.spades >= 3) {
       }
-      if (suits.diamonds >= 3 && !inventory.diamondEmpower && !state.setBonusChoicePendingSuit) {
+      if (selectedCharacter.id !== "rogue" && suits.diamonds >= 3 && !inventory.diamondEmpower && !state.setBonusChoicePendingSuit) {
         state.setBonusChoicePendingSuit = "diamonds";
       }
       dashState.maxCharges = 1 + passive.dashChargesBonus;
       dashState.charges = Math.min(dashState.charges || dashState.maxCharges, dashState.maxCharges);
-      player.maxHp = Math.max(1, 10 + maxHpBonus);
+      player.maxHp = Math.max(1, selectedCharacter.baseHp + maxHpBonus);
       player.hp = Math.min(player.hp, player.maxHp);
       renderCardSlots();
       updateSetBonusStatus();
+    }
+    function effectiveAbilityCooldown(abilityId, baseCooldown, minCooldown, extraFlatReduction = 0) {
+      const flat = (passive.cooldownFlat[abilityId] || 0) + extraFlatReduction;
+      const pct = clamp(passive.cooldownPct[abilityId] || 0, 0, 0.85);
+      return Math.max(minCooldown, Math.max(0, baseCooldown - flat) * (1 - pct));
     }
     function updateSetBonusStatus() {
       const lines = getSetBonusLines();
@@ -595,12 +684,22 @@
       for (const card of inventory.cards) suits[card.suit] += 1;
       const lines = [];
       if (suits.diamonds >= 3) {
-        const pick = inventory.diamondEmpower === "dash2x" ? "dash goes twice as far" : inventory.diamondEmpower === "speedPassive" ? "speed burst is passive" : inventory.diamondEmpower === "decoyLead" ? "decoy drifts away, cooldown -2s, duration +1s" : "choose your empowerment in inventory";
-        lines.push(`Set bonus! Diamonds: ${pick}.`);
+        if (selectedCharacter.id === "rogue") {
+          lines.push("Set bonus! Diamonds: dash range and smoke radius increased.");
+        } else {
+          const pick = inventory.diamondEmpower === "dash2x" ? "dash goes twice as far" : inventory.diamondEmpower === "speedPassive" ? "speed burst is passive" : inventory.diamondEmpower === "decoyLead" ? "decoy drifts away, cooldown -2s, duration +1s" : "choose your empowerment in inventory";
+          lines.push(`Set bonus! Diamonds: ${pick}.`);
+        }
       }
       if (suits.hearts >= 3) lines.push("Set bonus! Hearts: passive HP regeneration.");
-      if (suits.clubs >= 3) lines.push("Set bonus! Clubs: burst phase-through terrain.");
-      if (suits.spades >= 3) lines.push("Set bonus! Spades: ult slows the world for 3s.");
+      if (suits.clubs >= 3) {
+        lines.push(
+          selectedCharacter.id === "rogue" ? "Set bonus! Clubs: phase through terrain while inside smoke." : "Set bonus! Clubs: burst phase-through terrain."
+        );
+      }
+      if (suits.spades >= 3) {
+        lines.push("Set bonus! Spades: on stealth landing, +0.1s stealth (dash that moves while hidden).");
+      }
       return lines;
     }
     function renderCardModal() {
@@ -783,6 +882,71 @@
       }
       return false;
     }
+    function isPointNearTerrain(x, y, extraRadius = 40) {
+      const rr = extraRadius * extraRadius;
+      for (const obstacle of obstacles) {
+        const cx = clamp(x, obstacle.x, obstacle.x + obstacle.w);
+        const cy = clamp(y, obstacle.y, obstacle.y + obstacle.h);
+        const dx = x - cx;
+        const dy = y - cy;
+        if (dx * dx + dy * dy <= rr) return true;
+      }
+      return false;
+    }
+    function nearestTerrainInfo(x, y) {
+      let bestDist = Infinity;
+      let bestPoint = null;
+      for (const obstacle of obstacles) {
+        const cx = clamp(x, obstacle.x, obstacle.x + obstacle.w);
+        const cy = clamp(y, obstacle.y, obstacle.y + obstacle.h);
+        const dx = x - cx;
+        const dy = y - cy;
+        const d = Math.hypot(dx, dy);
+        if (d < bestDist) {
+          bestDist = d;
+          bestPoint = { x: cx, y: cy };
+        }
+      }
+      return { dist: bestDist, point: bestPoint };
+    }
+    function playerInsideSmoke() {
+      for (const smoke of entities.smokeZones) {
+        if (state.elapsed >= smoke.expiresAt) continue;
+        const dx = player.x - smoke.x;
+        const dy = player.y - smoke.y;
+        if (dx * dx + dy * dy <= smoke.r * smoke.r) return true;
+      }
+      return false;
+    }
+    function isPlayerHuggingTerrain(margin = 20) {
+      const probe = { x: player.x, y: player.y, r: player.r + margin };
+      for (const obstacle of obstacles) {
+        if (intersectsRectCircle(probe, obstacle)) return true;
+      }
+      return false;
+    }
+    function pointToSegmentDistanceSq(px, py, x1, y1, x2, y2) {
+      const vx = x2 - x1;
+      const vy = y2 - y1;
+      const wx = px - x1;
+      const wy = py - y1;
+      const c1 = vx * wx + vy * wy;
+      if (c1 <= 0) return (px - x1) ** 2 + (py - y1) ** 2;
+      const c2 = vx * vx + vy * vy;
+      if (c2 <= c1) return (px - x2) ** 2 + (py - y2) ** 2;
+      const b = c1 / c2;
+      const bx = x1 + b * vx;
+      const by = y1 + b * vy;
+      return (px - bx) ** 2 + (py - by) ** 2;
+    }
+    function segmentIntersectsSmoke(x1, y1, x2, y2) {
+      for (const smoke of entities.smokeZones) {
+        if (state.elapsed >= smoke.expiresAt) continue;
+        const d2 = pointToSegmentDistanceSq(smoke.x, smoke.y, x1, y1, x2, y2);
+        if (d2 <= smoke.r * smoke.r) return true;
+      }
+      return false;
+    }
     function lineIntersectsRect2(x1, y1, x2, y2, rect) {
       const steps = Math.max(6, Math.ceil(Math.hypot(x2 - x1, y2 - y1) / 12));
       for (let i = 0; i <= steps; i++) {
@@ -794,6 +958,7 @@
       return false;
     }
     function hasLineOfSight(from, target) {
+      if (segmentIntersectsSmoke(from.x, from.y, target.x, target.y)) return false;
       for (const obstacle of obstacles) {
         if (lineIntersectsRect2(from.x, from.y, target.x, target.y, obstacle)) return false;
       }
@@ -916,6 +1081,33 @@
         r
       };
     }
+    function selectCharacter(id) {
+      const picked = CHARACTERS[id];
+      if (!picked) return;
+      selectedCharacter = picked;
+      abilities = makeAbilitiesForCharacter(selectedCharacter);
+      passive.cooldownFlat = makeCooldownFlatForCharacter(selectedCharacter);
+      passive.cooldownPct = makeCooldownPctForCharacter(selectedCharacter);
+    }
+    function startGameWithCharacter(id) {
+      selectCharacter(id);
+      gameStarted = true;
+      if (characterSelectModal) characterSelectModal.classList.remove("open");
+      resetGame();
+    }
+    function wireCharacterSelect() {
+      if (!characterSelectModal || !characterSelectOptions?.length) {
+        startGameWithCharacter("knight");
+        return;
+      }
+      characterSelectModal.classList.add("open");
+      for (const btn of characterSelectOptions) {
+        btn.addEventListener("click", () => {
+          const id = btn.dataset.characterId || "knight";
+          startGameWithCharacter(id);
+        });
+      }
+    }
     function lootSpawnIntervalScale() {
       const activeCount = Math.max(1, activeHexes.length || 1);
       return Math.max(1, Math.sqrt(activeCount / LOOT_DENSITY_BASE_ACTIVE_HEXES));
@@ -948,13 +1140,24 @@
       state.pendingCard = null;
       state.setBonusChoicePendingSuit = null;
       state.playerHeadstartUntil = 0;
+      state.rogueHungerMax = 60;
+      state.rogueHunger = state.rogueHungerMax;
+      state.rogueLastSeenAt = 0;
+      state.rogueAlertUntil = 0;
+      state.rogueStealthActive = false;
+      state.rogueStealthOpenUntil = 0;
+      state.rogueFoodSenseUntil = 0;
+      state.rogueNextFoodAt = 6;
+      state.rogueNextHungryPopupAt = 8;
+      state.rogueDashAiming = false;
+      state.rogueLastKnownPlayerPos = { x: player.x, y: player.y };
       player.x = 96;
       player.y = 340;
       obstacles = [];
       activePlayerHex = { q: 0, r: 0 };
       activeHexes = [];
       lastPlayerHexKey = null;
-      player.maxHp = 10;
+      player.maxHp = selectedCharacter.baseHp;
       player.hp = player.maxHp;
       player.facing = { x: 1, y: 0 };
       player.burstUntil = 0;
@@ -982,19 +1185,23 @@
       entities.ultimateEffects = [];
       entities.cards = [];
       entities.healPopups = [];
+      entities.smokeZones = [];
+      entities.foods = [];
       inventory.cards = [];
       inventory.backpackCard = null;
       inventory.diamondEmpower = null;
       inventory.heartsRegenPerSec = 0;
-      inventory.spadesUltSlowUntil = 0;
+      inventory.spadesLandingStealthUntil = 0;
       inventory.spadesObstacleBoostUntil = 0;
       inventory.clubsInvisUntil = 0;
       inventory.clubsPhaseThroughTerrain = false;
+      inventory.rogueDiamondRangeBoost = false;
       inventory.heartsResistanceReadyAt = 0;
       inventory.heartsResistanceCooldownDuration = 0;
       inventory.heartsRegenBank = 0;
       inventory.dodgeTextUntil = 0;
-      passive.cooldownFlat = { dash: 0, burst: 0, decoy: 0 };
+      passive.cooldownFlat = makeCooldownFlatForCharacter(selectedCharacter);
+      passive.cooldownPct = makeCooldownPctForCharacter(selectedCharacter);
       passive.speedMult = 1;
       passive.obstacleTouchMult = 1;
       passive.dodgeChanceWhenDashCd = 0;
@@ -1146,7 +1353,8 @@
       ctx2.save();
       ctx2.textAlign = "center";
       ctx2.textBaseline = "bottom";
-      const yMain = py - pr - 10;
+      const hpLift = selectedCharacter.id === "rogue" ? 7 : 0;
+      const yMain = py - pr - 10 - hpLift;
       const yExtra = yMain - (extra ? 14 : 0);
       ctx2.font = "bold 15px ui-sans-serif, system-ui, Segoe UI, sans-serif";
       ctx2.lineWidth = 4;
@@ -1424,6 +1632,91 @@
         expiresAt: state.elapsed + 12
       });
     }
+    function spawnRogueFood() {
+      const point = randomOpenPoint(13);
+      entities.foods.push({
+        x: point.x,
+        y: point.y,
+        r: 13,
+        bornAt: state.elapsed,
+        expiresAt: state.elapsed + 20,
+        nutrition: 40
+      });
+    }
+    function updateRogueNeeds(simDt, moving, touchedObstacle) {
+      if (selectedCharacter.id !== "rogue") return;
+      state.rogueHunger = Math.max(0, state.rogueHunger - simDt);
+      if (state.rogueHunger <= 0) {
+        player.hp = 0;
+        state.running = false;
+        state.deathStartedAtMs = state.lastTime;
+        state.bestSurvival = Math.max(state.bestSurvival, state.elapsed);
+        return;
+      }
+      while (state.elapsed >= state.rogueNextFoodAt) {
+        spawnRogueFood();
+        state.rogueNextFoodAt += rand(4.8, 7.8);
+      }
+      const inSmoke = playerInsideSmoke();
+      const huggingTerrain = touchedObstacle || isPlayerHuggingTerrain(20) || isPointNearTerrain(player.x, player.y, 56);
+      const canEnterStealth = state.elapsed - state.rogueLastSeenAt >= ROGUE_STEALTH_AFTER_LOS_BREAK || inSmoke;
+      if (canEnterStealth && (huggingTerrain || inSmoke)) {
+        state.rogueStealthActive = true;
+        state.rogueStealthOpenUntil = state.elapsed + ROGUE_STEALTH_OPEN_GRACE;
+      }
+      if (state.rogueStealthActive) {
+        if (huggingTerrain || inSmoke) {
+          state.rogueStealthOpenUntil = state.elapsed + ROGUE_STEALTH_OPEN_GRACE;
+        } else if (state.elapsed >= state.rogueStealthOpenUntil) {
+          state.rogueStealthActive = false;
+        }
+      }
+      const hungryRatio = 1 - clamp(state.rogueHunger / Math.max(1e-3, state.rogueHungerMax), 0, 1);
+      if (hungryRatio >= 0.25 && state.elapsed >= state.rogueNextHungryPopupAt) {
+        spawnHealPopup(player.x, player.y - player.r - 12, "I'm hungry", "#67e8f9");
+        const cadence = hungryRatio >= 0.7 ? 3.2 : hungryRatio >= 0.45 ? 5.2 : 7;
+        state.rogueNextHungryPopupAt = state.elapsed + cadence;
+      }
+      for (let i = entities.foods.length - 1; i >= 0; i--) {
+        const f = entities.foods[i];
+        if (state.elapsed >= f.expiresAt) {
+          entities.foods.splice(i, 1);
+          continue;
+        }
+        const rr = f.r + player.r;
+        if (distSq(f, player) <= rr * rr) {
+          state.rogueHunger = Math.min(state.rogueHungerMax, Math.max(state.rogueHunger, f.nutrition ?? 40));
+          spawnHealPopup(player.x, player.y - player.r - 8, "Fed", "#fcd34d");
+          entities.foods.splice(i, 1);
+        }
+      }
+    }
+    function updateRogueLineOfSightState() {
+      if (selectedCharacter.id !== "rogue") {
+        state.rogueHasEnemyLos = false;
+        return;
+      }
+      let seen = false;
+      for (const h of entities.hunters) {
+        if (h.type === "spawner") continue;
+        if (state.elapsed < (h.stunnedUntil || 0)) continue;
+        if (hasLineOfSight(h, player)) {
+          seen = true;
+          break;
+        }
+      }
+      state.rogueHasEnemyLos = seen;
+      if (seen) state.rogueLastSeenAt = state.elapsed;
+    }
+    function anyOtherEnemyHasLineOfSightToPlayer(excludedHunter) {
+      for (const h of entities.hunters) {
+        if (h === excludedHunter) continue;
+        if (h.type === "spawner") continue;
+        if (state.elapsed < (h.stunnedUntil || 0)) continue;
+        if (hasLineOfSight(h, player)) return true;
+      }
+      return false;
+    }
     function spawnHealPopup(x, y, text = "+1", color = "#86efac") {
       entities.healPopups.push({
         x,
@@ -1480,43 +1773,106 @@
       const ability = abilities.dash;
       if (!state.running) return;
       if (dashState.charges <= 0) return;
+      const spadesCount = inventory.cards.filter((c) => c.suit === "spades").length;
+      const wasStealthed = selectedCharacter.id === "rogue" && state.rogueStealthActive || state.elapsed < inventory.clubsInvisUntil;
       dashState.charges -= 1;
       if (dashState.charges < dashState.maxCharges) {
-        const cd = Math.max(0.25, ability.cooldown - passive.cooldownFlat.dash);
+        const cd = effectiveAbilityCooldown("dash", ability.cooldown, ability.minCooldown ?? 0.25);
         dashState.nextRechargeAt = Math.max(dashState.nextRechargeAt, state.elapsed + cd);
       }
-      const dir = player.facing;
+      const target = computeDashTarget();
+      if (target.progressed) {
+        player.x = target.x;
+        player.y = target.y;
+        if (spadesCount >= 3 && wasStealthed) {
+          inventory.spadesLandingStealthUntil = Math.max(
+            inventory.spadesLandingStealthUntil,
+            state.elapsed + 0.1
+          );
+        }
+      }
+    }
+    function currentDashDirection() {
+      let mx = 0;
+      let my = 0;
+      if (state.keys.has("arrowleft")) mx -= 1;
+      if (state.keys.has("arrowright")) mx += 1;
+      if (state.keys.has("arrowup")) my -= 1;
+      if (state.keys.has("arrowdown")) my += 1;
+      if (mx || my) {
+        const len = Math.hypot(mx, my) || 1;
+        return { x: mx / len, y: my / len };
+      }
+      return { x: player.facing.x || 1, y: player.facing.y || 0 };
+    }
+    function currentDashRange() {
+      return selectedCharacter.id === "rogue" ? inventory.rogueDiamondRangeBoost ? 180 : 120 : inventory.diamondEmpower === "dash2x" ? 240 : 120;
+    }
+    function computeDashTarget() {
+      const dir = currentDashDirection();
       const step = 12;
-      const dashRange = inventory.diamondEmpower === "dash2x" ? 240 : 120;
+      const dashRange = currentDashRange();
       let tx = player.x;
       let ty = player.y;
       let progressed = false;
       for (let d = step; d <= dashRange; d += step) {
         const test = { x: player.x + dir.x * d, y: player.y + dir.y * d, r: player.r };
         if (outOfBoundsCircle(test)) break;
-        if (collidesAnyObstacle(test)) continue;
+        if (collidesAnyObstacle(test)) {
+          if (selectedCharacter.id === "rogue") break;
+          continue;
+        }
         tx = test.x;
         ty = test.y;
         progressed = true;
       }
-      if (progressed) {
-        player.x = tx;
-        player.y = ty;
-      }
+      return { x: tx, y: ty, progressed, dir, range: dashRange };
+    }
+    function startRogueDashAim() {
+      if (selectedCharacter.id !== "rogue") return;
+      if (!state.running || state.pausedForCard || state.inventoryModalOpen) return;
+      if (dashState.charges <= 0) return;
+      state.rogueDashAiming = true;
+    }
+    function releaseRogueDashAim() {
+      if (selectedCharacter.id !== "rogue") return;
+      if (!state.rogueDashAiming) return;
+      state.rogueDashAiming = false;
+      tryDash();
     }
     function tryBurst() {
       const ability = abilities.burst;
       if (state.elapsed < ability.nextReadyAt || !state.running) return;
-      const burstCd = Math.max(0.4, ability.cooldown - passive.cooldownFlat.burst);
+      if (selectedCharacter.id === "rogue") {
+        ability.nextReadyAt = state.elapsed + effectiveAbilityCooldown("burst", ability.cooldown, ability.minCooldown ?? 1);
+        entities.smokeZones.push({
+          x: player.x,
+          y: player.y,
+          r: inventory.rogueDiamondRangeBoost ? 260 : 180,
+          bornAt: state.elapsed,
+          expiresAt: state.elapsed + (ability.duration ?? 3)
+        });
+        spawnAttackRing(player.x, player.y, 72, "#94a3b8", 0.2);
+        spawnAttackRing(player.x, player.y, 128, "#cbd5e1", 0.28);
+        return;
+      }
+      const burstCd = effectiveAbilityCooldown("burst", ability.cooldown, ability.minCooldown ?? 0.4);
       ability.nextReadyAt = state.elapsed + burstCd;
       player.burstUntil = state.elapsed + ability.duration;
-      if (passive.invisOnBurst > 0) inventory.clubsInvisUntil = Math.max(inventory.clubsInvisUntil, state.elapsed + passive.invisOnBurst);
+      if (selectedCharacter.id !== "rogue" && passive.invisOnBurst > 0) {
+        inventory.clubsInvisUntil = Math.max(inventory.clubsInvisUntil, state.elapsed + passive.invisOnBurst);
+      }
     }
     function tryDecoy() {
       const ability = abilities.decoy;
       if (state.elapsed < ability.nextReadyAt || !state.running) return;
+      if (selectedCharacter.id === "rogue") {
+        ability.nextReadyAt = state.elapsed + Math.max(ability.minCooldown ?? 0.5, ability.cooldown);
+        state.rogueFoodSenseUntil = Math.max(state.rogueFoodSenseUntil, state.elapsed + 2.8);
+        return;
+      }
       const decoyEmpower = inventory.diamondEmpower === "decoyLead";
-      const decoyCd = Math.max(0.4, ability.cooldown - passive.cooldownFlat.decoy - (decoyEmpower ? 2 : 0));
+      const decoyCd = effectiveAbilityCooldown("decoy", ability.cooldown, ability.minCooldown ?? 0.4, decoyEmpower ? 2 : 0);
       ability.nextReadyAt = state.elapsed + decoyCd;
       entities.decoys.push({
         x: player.x,
@@ -1576,11 +1932,6 @@
             entities.projectiles.splice(i, 1);
           }
         }
-        const spadesCount = inventory.cards.filter((c) => c.suit === "spades").length;
-        if (spadesCount >= 3) {
-          const delay = state.playerTimelockUntil > state.elapsed ? state.playerTimelockUntil - state.elapsed : 0;
-          inventory.spadesUltSlowUntil = Math.max(inventory.spadesUltSlowUntil, state.elapsed + delay + 3);
-        }
         state.ultimatePushbackReadyAt = state.elapsed + 8;
       } else if (ability.type === "timelock") {
         state.playerTimelockUntil = Math.max(state.playerTimelockUntil, state.elapsed + 2);
@@ -1611,8 +1962,24 @@
       return best;
     }
     function pickTargetForHunter(hunter) {
+      if (selectedCharacter.id === "rogue") {
+        if (state.elapsed < inventory.spadesLandingStealthUntil) {
+          return nearestDecoy(hunter) || { x: hunter.x + hunter.dir.x * 40, y: hunter.y + hunter.dir.y * 40 };
+        }
+        if (state.rogueStealthActive) {
+          return nearestDecoy(hunter) || { x: hunter.x + hunter.dir.x * 40, y: hunter.y + hunter.dir.y * 40 };
+        }
+        const hasLosToPlayer = hasLineOfSight(hunter, player);
+        if (hasLosToPlayer) {
+          state.rogueLastSeenAt = state.elapsed;
+          state.rogueAlertUntil = Math.max(state.rogueAlertUntil, state.elapsed + 1.4);
+          state.rogueLastKnownPlayerPos = { x: player.x, y: player.y };
+          return player;
+        }
+        return state.rogueLastKnownPlayerPos || { x: hunter.x + hunter.dir.x * 40, y: hunter.y + hunter.dir.y * 40 };
+      }
       let target = player;
-      if (state.elapsed < inventory.clubsInvisUntil) {
+      if (state.elapsed < inventory.clubsInvisUntil || state.elapsed < inventory.spadesLandingStealthUntil) {
         return nearestDecoy(hunter) || { x: hunter.x + hunter.dir.x * 40, y: hunter.y + hunter.dir.y * 40 };
       }
       if (!entities.decoys.length) return target;
@@ -1664,7 +2031,24 @@
         const age = clamp((state.elapsed - h.bornAt) / lifeSpan, 0, 1);
         const speedFactor = 1 + age * 0.9;
         const baseSpeed = h.type === "sniper" ? 100 : h.type === "cutter" ? 116 : h.type === "laser" ? 138 : h.type === "ranged" ? 85 : h.type === "fast" ? 150 : 110;
-        const speed = baseSpeed * speedFactor;
+        let speed = baseSpeed * speedFactor;
+        const rogueInSeekMode = selectedCharacter.id === "rogue" && state.elapsed > state.rogueAlertUntil;
+        if (rogueInSeekMode) speed *= 0.58;
+        if (selectedCharacter.id === "rogue" && state.rogueStealthActive) {
+          if (!h.patrolDir || state.elapsed >= (h.patrolTurnAt ?? 0)) {
+            const ang = Math.random() * TAU;
+            h.patrolDir = { x: Math.cos(ang), y: Math.sin(ang) };
+            h.patrolTurnAt = state.elapsed + rand(0.8, 1.8);
+          }
+          const patrolSteer = avoidObstacles(h, h.patrolDir);
+          h.dir.x = h.dir.x * 0.7 + patrolSteer.x * 0.3;
+          h.dir.y = h.dir.y * 0.7 + patrolSteer.y * 0.3;
+          const plen = Math.hypot(h.dir.x, h.dir.y) || 1;
+          h.dir.x /= plen;
+          h.dir.y /= plen;
+          moveCircleWithCollisions(h, h.dir.x * speed * 0.38, h.dir.y * speed * 0.38, dt);
+          continue;
+        }
         let desired;
         if (h.type === "cutter") {
           const target = pickTargetForHunter(h);
@@ -1677,19 +2061,19 @@
             desired = vectorToTarget(h, target);
           }
         } else if (h.type === "sniper") {
-          const target = nearestDecoy(h) || player;
+          const target = pickTargetForHunter(h);
           const away = vectorToTarget(target, h);
           const toward = vectorToTarget(h, target);
           const d2 = distSq(h, target);
           desired = d2 < 210 * 210 ? away : toward;
         } else if (h.type === "ranged") {
-          const target = nearestDecoy(h) || player;
+          const target = pickTargetForHunter(h);
           const d2 = distSq(h, target);
           const away = vectorToTarget(target, h);
           const toward = vectorToTarget(h, target);
           desired = d2 < 240 * 240 ? away : toward;
         } else if (h.type === "laser") {
-          const target = nearestDecoy(h) || player;
+          const target = pickTargetForHunter(h);
           const los = hasLineOfSight(h, target);
           if (h.laserState === "aim") {
             if (state.elapsed >= h.aimStartedAt + h.laserWarning) {
@@ -1806,9 +2190,10 @@
       for (const h of entities.hunters) {
         if (h.type !== "ranged") continue;
         if (state.elapsed - h.lastShotAt < h.shotInterval) continue;
+        const target = pickTargetForHunter(h);
+        if (selectedCharacter.id === "rogue" && target !== player) continue;
         h.lastShotAt = state.elapsed;
         spawnAttackRing(h.x, h.y, h.r + 7, "#fb923c", 0.14);
-        const target = nearestDecoy(h) || player;
         const to = vectorToTarget(h, target);
         const speed = h.shotSpeed || 360;
         entities.projectiles.push({
@@ -1883,6 +2268,8 @@
     }
     function damagePlayer(amount) {
       if (!state.running) return;
+      if (selectedCharacter.id === "rogue" && state.rogueStealthActive) return;
+      if (state.elapsed < inventory.spadesLandingStealthUntil) return;
       if (state.elapsed < state.playerInvulnerableUntil) return;
       if (amount <= 0) return;
       if (state.elapsed < inventory.clubsInvisUntil) return;
@@ -1933,9 +2320,11 @@
       for (const h of entities.hunters) {
         if (h.type !== "sniper") continue;
         if (state.elapsed - h.lastShotAt < 2.1) continue;
+        const target = pickTargetForHunter(h);
+        if (selectedCharacter.id === "rogue" && target !== player) continue;
+        if (selectedCharacter.id === "rogue" && !anyOtherEnemyHasLineOfSightToPlayer(h)) continue;
         h.lastShotAt = state.elapsed;
         spawnAttackRing(h.x, h.y, h.r + 6, "#fb7185", 0.2);
-        const target = nearestDecoy(h) || player;
         const windup = SNIPER_ARTILLERY_WINDUP;
         const leadT = windup * SNIPER_ARTILLERY_LEAD;
         const tvx = target === player ? player.velX : 0;
@@ -2136,12 +2525,13 @@
       }
     }
     function update(dt) {
+      if (!gameStarted) return;
       if (!state.running) return;
       if (state.manualPause) return;
       if (state.pausedForCard) return;
-      const worldSlow = state.elapsed < inventory.spadesUltSlowUntil ? 0.35 : 1;
-      const simDt = dt * worldSlow;
+      const simDt = dt;
       state.elapsed += simDt;
+      updateRogueLineOfSightState();
       const enemiesFrozen = state.elapsed < state.playerHeadstartUntil;
       state.hurtFlash = Math.max(0, state.hurtFlash - simDt);
       state.screenShakeStrength = Math.max(0, state.screenShakeStrength - simDt * 30);
@@ -2201,6 +2591,9 @@
       for (let i = entities.healPopups.length - 1; i >= 0; i--) {
         if (state.elapsed >= entities.healPopups[i].expiresAt) entities.healPopups.splice(i, 1);
       }
+      for (let i = entities.smokeZones.length - 1; i >= 0; i--) {
+        if (state.elapsed >= entities.smokeZones[i].expiresAt) entities.smokeZones.splice(i, 1);
+      }
       let mx = 0;
       let my = 0;
       if (state.keys.has("arrowleft")) mx -= 1;
@@ -2213,6 +2606,10 @@
         my /= mlen;
         player.facing.x = mx;
         player.facing.y = my;
+      }
+      if (selectedCharacter.id === "rogue" && state.rogueDashAiming) {
+        mx = 0;
+        my = 0;
       }
       if (state.playerTimelockUntil > 0) {
         mx = 0;
@@ -2227,13 +2624,15 @@
       const speedMult = 1 + burstBonus + passiveBonus + terrainBonus;
       const effectiveSpeed = player.speed * speedMult * playerSpeedHealthMultiplier();
       const moving = mx !== 0 || my !== 0;
-      const phaseThrough = inventory.clubsPhaseThroughTerrain && state.elapsed < player.burstUntil;
+      const phaseThrough = inventory.clubsPhaseThroughTerrain && (selectedCharacter.id === "rogue" ? playerInsideSmoke() : state.elapsed < player.burstUntil);
       const moveRes = moveCircleWithCollisions(player, mx * effectiveSpeed, my * effectiveSpeed, dt, {
         ignoreObstacles: phaseThrough
       });
       if (moving && moveRes.touchedObstacle && passive.obstacleTouchMult > 1) {
         inventory.spadesObstacleBoostUntil = state.elapsed + TERRAIN_SPEED_BOOST_LINGER;
       }
+      updateRogueNeeds(simDt, moving, moveRes.touchedObstacle);
+      if (!state.running) return;
       updatePlayerVelocity(dt);
       if (!enemiesFrozen) {
         moveHunters(simDt);
@@ -2258,40 +2657,138 @@
       ctx.fillText("Best: " + state.bestSurvival.toFixed(1) + "s", 14, 32);
       ctx.fillText("Wave: " + state.wave, 14, 52);
       ctx.fillText("Hunters: " + entities.hunters.length, 14, 72);
+      if (selectedCharacter.id === "rogue") {
+        const ratio = clamp(state.rogueHunger / Math.max(1e-3, state.rogueHungerMax), 0, 1);
+        const x = 14;
+        const y = 94;
+        const w = 160;
+        const h = 10;
+        ctx.fillStyle = "rgba(51, 65, 85, 0.9)";
+        ctx.fillRect(x, y, w, h);
+        ctx.fillStyle = ratio > 0.35 ? "#f59e0b" : "#ef4444";
+        ctx.fillRect(x, y, w * ratio, h);
+        ctx.strokeStyle = "rgba(148, 163, 184, 0.6)";
+        ctx.lineWidth = 1;
+        ctx.strokeRect(x - 0.5, y - 0.5, w + 1, h + 1);
+        ctx.fillStyle = "#fde68a";
+        ctx.fillText(`Fed: ${state.rogueHunger.toFixed(1)}s`, x, y + 14);
+        if (state.rogueStealthActive) {
+          ctx.fillStyle = "#bbf7d0";
+          ctx.fillText("Stealthed", x, y + 31);
+        } else if (state.elapsed <= state.rogueAlertUntil) {
+          ctx.fillStyle = "#fca5a5";
+          ctx.fillText("Alerted", x, y + 31);
+        } else {
+          ctx.fillStyle = "#93c5fd";
+          ctx.fillText("Seeking", x, y + 31);
+        }
+      }
+    }
+    function drawRogueSurvivalHud(ctx2) {
+      if (selectedCharacter.id !== "rogue") return;
+      const arcR = player.r + 12;
+      const trackStroke = "rgba(148, 163, 184, 0.42)";
+      const trackStrokeWide = "rgba(30, 41, 59, 0.55)";
+      ctx2.save();
+      ctx2.lineCap = "round";
+      if (state.rogueStealthActive) {
+        const graceRem = state.rogueStealthOpenUntil - state.elapsed;
+        const graceRatio = clamp(graceRem / Math.max(1e-3, ROGUE_STEALTH_OPEN_GRACE), 0, 1);
+        if (graceRatio > 0.02) {
+          const sCx = player.x;
+          const sCy = player.y;
+          const sLeft = -Math.PI * 0.8;
+          const sRight = -Math.PI * 0.2;
+          const stealthFill = graceRatio > 0.35 ? "#6ee7b7" : "#34d399";
+          ctx2.strokeStyle = trackStrokeWide;
+          ctx2.lineWidth = 3;
+          ctx2.beginPath();
+          ctx2.arc(sCx, sCy, arcR, sLeft, sRight);
+          ctx2.stroke();
+          ctx2.strokeStyle = trackStroke;
+          ctx2.lineWidth = 2;
+          ctx2.beginPath();
+          ctx2.arc(sCx, sCy, arcR, sLeft, sRight);
+          ctx2.stroke();
+          ctx2.strokeStyle = stealthFill;
+          ctx2.lineWidth = 2;
+          ctx2.beginPath();
+          const stealthEnd = sLeft + (sRight - sLeft) * graceRatio;
+          ctx2.arc(sCx, sCy, arcR, stealthEnd, sLeft, true);
+          ctx2.stroke();
+        }
+      }
+      const ratio = clamp(state.rogueHunger / Math.max(1e-3, state.rogueHungerMax), 0, 1);
+      const hungerFill = ratio > 0.35 ? "#f59e0b" : "#ef4444";
+      const hCx = player.x;
+      const hCy = player.y;
+      const hLeft = Math.PI * 0.2;
+      const hRight = Math.PI * 0.8;
+      ctx2.strokeStyle = trackStrokeWide;
+      ctx2.lineWidth = 3;
+      ctx2.beginPath();
+      ctx2.arc(hCx, hCy, arcR, hLeft, hRight);
+      ctx2.stroke();
+      ctx2.strokeStyle = trackStroke;
+      ctx2.lineWidth = 2;
+      ctx2.beginPath();
+      ctx2.arc(hCx, hCy, arcR, hLeft, hRight);
+      ctx2.stroke();
+      if (ratio > 1e-3) {
+        ctx2.strokeStyle = hungerFill;
+        ctx2.lineWidth = 2;
+        ctx2.beginPath();
+        const hungerStart = hRight - (hRight - hLeft) * ratio;
+        ctx2.arc(hCx, hCy, arcR, hungerStart, hRight);
+        ctx2.stroke();
+      }
+      ctx2.restore();
     }
     function updateAbilityButtons() {
       if (!abilitySlots) return;
-      const dashReduction = Math.max(0, passive.cooldownFlat.dash);
-      const burstReduction = Math.max(0, passive.cooldownFlat.burst);
-      const decoyReduction = Math.max(0, passive.cooldownFlat.decoy + (inventory.diamondEmpower === "decoyLead" ? 2 : 0));
+      const dashReduction = Math.max(0, passive.cooldownFlat.dash || 0);
+      const burstReduction = Math.max(0, passive.cooldownFlat.burst || 0);
+      const decoyReduction = Math.max(
+        0,
+        (passive.cooldownFlat.decoy || 0) + (selectedCharacter.id === "knight" && inventory.diamondEmpower === "decoyLead" ? 2 : 0)
+      );
+      const dashPct = Math.max(0, passive.cooldownPct.dash || 0);
+      const burstPct = Math.max(0, passive.cooldownPct.burst || 0);
+      const decoyPct = Math.max(0, passive.cooldownPct.decoy || 0);
       const cdrSuffix = (base, reduction) => {
         if (!(reduction > 1e-3) || !(base > 1e-3)) return "";
         const pct = Math.round(reduction / base * 100);
         return ` -${reduction.toFixed(1)}s -${pct}%`;
       };
+      const cdrPctSuffix = (pct) => pct > 1e-3 ? ` -${Math.round(pct * 100)}%` : "";
       const abilitiesUi = [
         {
-          key: "Q",
-          label: "Dash" + cdrSuffix(abilities.dash.cooldown, dashReduction),
+          key: abilities.dash.key.toUpperCase(),
+          label: `${abilities.dash.label}` + (dashPct > 1e-3 ? cdrPctSuffix(dashPct) : cdrSuffix(abilities.dash.cooldown, dashReduction)),
           color: "#38bdf8",
           remaining: cdr(abilities.dash),
-          duration: Math.max(0.25, abilities.dash.cooldown - dashReduction),
+          duration: effectiveAbilityCooldown("dash", abilities.dash.cooldown, abilities.dash.minCooldown ?? 0.25),
           extra: `${dashState.charges}/${dashState.maxCharges}`
         },
         {
-          key: "W",
-          label: "Burst" + cdrSuffix(abilities.burst.cooldown, burstReduction),
+          key: abilities.burst.key.toUpperCase(),
+          label: `${abilities.burst.label}` + (burstPct > 1e-3 ? cdrPctSuffix(burstPct) : cdrSuffix(abilities.burst.cooldown, burstReduction)),
           color: "#22d3ee",
           remaining: cdr(abilities.burst),
-          duration: Math.max(0.4, abilities.burst.cooldown - burstReduction),
+          duration: effectiveAbilityCooldown("burst", abilities.burst.cooldown, abilities.burst.minCooldown ?? 0.4),
           extra: ""
         },
         {
-          key: "E",
-          label: "Decoy" + cdrSuffix(abilities.decoy.cooldown, decoyReduction),
+          key: abilities.decoy.key.toUpperCase(),
+          label: `${abilities.decoy.label}` + (decoyPct > 1e-3 ? cdrPctSuffix(decoyPct) : cdrSuffix(abilities.decoy.cooldown, decoyReduction)),
           color: "#a78bfa",
           remaining: cdr(abilities.decoy),
-          duration: Math.max(0.4, abilities.decoy.cooldown - decoyReduction),
+          duration: effectiveAbilityCooldown(
+            "decoy",
+            abilities.decoy.cooldown,
+            abilities.decoy.minCooldown ?? 0.4,
+            selectedCharacter.id === "knight" && inventory.diamondEmpower === "decoyLead" ? 2 : 0
+          ),
           extra: ""
         },
         (() => {
@@ -2308,7 +2805,7 @@
           if (type === "heal") color = "#4ade80";
           const ready = hasAbility && !locked && !outOfAmmo;
           return {
-            key: "R",
+            key: abilities.random.key.toUpperCase(),
             label: displayName,
             color,
             remaining: ready ? 0 : lockRemaining || 1,
@@ -2348,6 +2845,52 @@
       ctx.save();
       ctx.translate(-cameraX + shake.x, -cameraY + shake.y);
       drawObstacles(ctx, obstacles);
+      for (const smoke of entities.smokeZones) {
+        const t = clamp((state.elapsed - smoke.bornAt) / Math.max(1e-3, smoke.expiresAt - smoke.bornAt), 0, 1);
+        const alpha = 0.26 * (1 - t * 0.55);
+        drawCircle(ctx, smoke.x, smoke.y, smoke.r, "#1f2937", alpha);
+        ctx.strokeStyle = `rgba(203, 213, 225, ${0.25 * (1 - t)})`;
+        ctx.lineWidth = 2;
+        ctx.beginPath();
+        ctx.arc(smoke.x, smoke.y, smoke.r, 0, TAU);
+        ctx.stroke();
+      }
+      for (const food of entities.foods) {
+        const d = Math.hypot(food.x - player.x, food.y - player.y);
+        const near = clamp(1 - d / 360, 0, 1);
+        const sense = state.elapsed < state.rogueFoodSenseUntil ? 1 : 0;
+        const rr = food.r * (1 + near * 0.28 * sense);
+        drawCircle(ctx, food.x, food.y, rr, "#f59e0b", 0.9);
+        drawCircle(ctx, food.x, food.y, rr * 0.45, "#fef3c7", 0.85);
+        if (sense > 0) {
+          ctx.strokeStyle = "rgba(252, 211, 77, 0.7)";
+          ctx.lineWidth = 1.5;
+          ctx.beginPath();
+          ctx.arc(food.x, food.y, rr + 5 + near * 4, 0, TAU);
+          ctx.stroke();
+        }
+      }
+      if (selectedCharacter.id === "rogue" && state.rogueStealthActive) {
+        const safeRadius = 56;
+        const info = nearestTerrainInfo(player.x, player.y);
+        const terrainDist = Number.isFinite(info.dist) ? info.dist : safeRadius;
+        const inSafeRange = terrainDist <= safeRadius;
+        const ringColor = inSafeRange ? "rgba(110, 231, 183, 0.72)" : "rgba(248, 113, 113, 0.72)";
+        ctx.strokeStyle = "rgba(16, 185, 129, 0.22)";
+        ctx.lineWidth = 1.5;
+        ctx.beginPath();
+        ctx.arc(player.x, player.y, safeRadius, 0, TAU);
+        ctx.stroke();
+        if (info.point && inSafeRange) {
+          ctx.strokeStyle = ringColor;
+          ctx.lineWidth = 2.6;
+          ctx.beginPath();
+          ctx.moveTo(player.x, player.y);
+          ctx.lineTo(info.point.x, info.point.y);
+          ctx.stroke();
+          drawCircle(ctx, info.point.x, info.point.y, 3.4, "#a7f3d0", 0.95);
+        }
+      }
       for (const p of entities.pickups) {
         drawHealPickup(ctx, p, state.elapsed);
         const lifeLeft = clamp((p.expiresAt - state.elapsed) / (p.life || 1e-3), 0, 1);
@@ -2671,6 +3214,26 @@
         drawCircle(ctx, player.x, player.y, player.r + 8 + t * 24, "#fca5a5", 0.18 * (1 - t));
       }
       drawPlayerHpHud(ctx);
+      drawRogueSurvivalHud(ctx);
+      if (selectedCharacter.id === "rogue" && state.rogueDashAiming) {
+        const target = computeDashTarget();
+        const tipX = target.x;
+        const tipY = target.y;
+        ctx.strokeStyle = "rgba(125, 211, 252, 0.9)";
+        ctx.lineWidth = 2.4;
+        ctx.setLineDash([9, 7]);
+        ctx.beginPath();
+        ctx.moveTo(player.x, player.y);
+        ctx.lineTo(tipX, tipY);
+        ctx.stroke();
+        ctx.setLineDash([]);
+        drawCircle(ctx, tipX, tipY, 7, "#7dd3fc", 0.3);
+        ctx.strokeStyle = "rgba(186, 230, 253, 0.95)";
+        ctx.lineWidth = 2;
+        ctx.beginPath();
+        ctx.arc(tipX, tipY, 7, 0, TAU);
+        ctx.stroke();
+      }
       ctx.restore();
       if (state.snapshotPending) {
         state.snapshotPending = false;
@@ -2682,7 +3245,49 @@
         ctx.fillStyle = "rgba(220, 38, 38, 0.24)";
         ctx.fillRect(0, 0, world.w, world.h);
       }
+      if (selectedCharacter.id === "rogue" && state.running) {
+        const hungerMissing = 1 - clamp(state.rogueHunger / Math.max(1e-3, state.rogueHungerMax), 0, 1);
+        if (hungerMissing > 0) {
+          const alpha = 0.04 + hungerMissing * 0.22;
+          ctx.fillStyle = `rgba(20, 184, 166, ${alpha})`;
+          ctx.fillRect(0, 0, world.w, world.h);
+        }
+      }
+      if (selectedCharacter.id === "rogue" && state.running && !state.rogueHasEnemyLos) {
+        ctx.fillStyle = "rgba(16, 185, 129, 0.08)";
+        ctx.fillRect(0, 0, world.w, world.h);
+        ctx.fillStyle = "#d1fae5";
+        ctx.textAlign = "left";
+        ctx.textBaseline = "top";
+        ctx.font = "bold 14px Arial";
+        ctx.fillText("LoS broken", 14, 130);
+      }
       drawHud();
+      if (selectedCharacter.id === "rogue" && state.elapsed < state.rogueFoodSenseUntil) {
+        const px = player.x - cameraX + shake.x;
+        const py = player.y - cameraY + shake.y;
+        for (const food of entities.foods) {
+          const dx = food.x - player.x;
+          const dy = food.y - player.y;
+          const len = Math.hypot(dx, dy) || 1;
+          const ux = dx / len;
+          const uy = dy / len;
+          const near = clamp(1 - len / 420, 0, 1);
+          const reach = 48 + near * 22;
+          const tipX = px + ux * reach;
+          const tipY = py + uy * reach;
+          const sideX = -uy;
+          const sideY = ux;
+          const s = 7 + near * 4;
+          ctx.fillStyle = `rgba(252, 211, 77, ${0.45 + near * 0.5})`;
+          ctx.beginPath();
+          ctx.moveTo(tipX, tipY);
+          ctx.lineTo(tipX - ux * (s * 1.8) + sideX * s, tipY - uy * (s * 1.8) + sideY * s);
+          ctx.lineTo(tipX - ux * (s * 1.8) - sideX * s, tipY - uy * (s * 1.8) - sideY * s);
+          ctx.closePath();
+          ctx.fill();
+        }
+      }
       updateAbilityButtons();
       if (state.elapsed < inventory.dodgeTextUntil) {
         ctx.fillStyle = "#e2e8f0";
@@ -2739,7 +3344,13 @@
     }
     function onAbilityKey(key) {
       if (state.pausedForCard) return;
-      if (key === abilities.dash.key) tryDash();
+      if (key === abilities.dash.key) {
+        if (selectedCharacter.id === "rogue") {
+          startRogueDashAim();
+          return;
+        }
+        tryDash();
+      }
       if (key === abilities.burst.key) tryBurst();
       if (key === abilities.decoy.key) tryDecoy();
       if (key === abilities.random.key) useRandomAbility();
@@ -2747,8 +3358,9 @@
     window.addEventListener("keydown", (event) => {
       const key = event.key.toLowerCase();
       if (key.startsWith("arrow")) event.preventDefault();
+      if (!gameStarted) return;
       if (state.manualPause) {
-        const resumeGameplay = key.startsWith("arrow") || key === "q" || key === "w" || key === "e" || key === "r";
+        const resumeGameplay = key.startsWith("arrow") || key === abilities.dash.key || key === abilities.burst.key || key === abilities.decoy.key || key === abilities.random.key;
         if (!resumeGameplay) {
           if (key === " ") event.preventDefault();
           return;
@@ -2772,12 +3384,13 @@
       }
       if (key.startsWith("arrow")) state.keys.add(key);
       onAbilityKey(key);
-      if (key === "r" && !state.running) resetGame();
+      if (key === abilities.random.key && !state.running) resetGame();
     });
     window.addEventListener("keyup", (event) => {
       const key = event.key.toLowerCase();
       if (key.startsWith("arrow")) event.preventDefault();
       if (key.startsWith("arrow")) state.keys.delete(key);
+      if (key === abilities.dash.key) releaseRogueDashAim();
     });
     snapshotFolderButton.addEventListener("click", () => {
       chooseSnapshotFolder();
@@ -2791,7 +3404,7 @@
     if (cardCloseButton) {
       cardCloseButton.addEventListener("click", () => continueAfterLoadout());
     }
-    resetGame();
+    wireCharacterSelect();
     requestAnimationFrame(loop);
   }
 
@@ -2800,6 +3413,8 @@
     canvas: document.getElementById("game"),
     snapshotFolderButton: document.getElementById("snapshot-folder-button"),
     snapshotStatus: document.getElementById("snapshot-status"),
+    characterSelectModal: document.getElementById("character-select-modal"),
+    characterSelectOptions: Array.from(document.querySelectorAll("[data-character-id]")),
     abilitySlots: Array.from(document.querySelectorAll(".ability-slot")),
     cardSlotEls: Array.from(document.querySelectorAll("#card-slots .card-slot")),
     backpackSlotEl: document.getElementById("backpack-slot"),
