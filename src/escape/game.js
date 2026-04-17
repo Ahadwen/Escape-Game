@@ -48,6 +48,18 @@ const LOOT_DENSITY_BASE_ACTIVE_HEXES = 3;
 const TERRAIN_SPEED_BOOST_LINGER = 0.16;
 const ROGUE_STEALTH_AFTER_LOS_BREAK = 0.35;
 const ROGUE_STEALTH_OPEN_GRACE = 0.4;
+/** Food sets hunger to at least this many seconds (cap stays rogueHungerMax). */
+const ROGUE_FOOD_HUNGER_RESTORE = 30;
+/** Seconds food stays on the map before expiring. */
+const ROGUE_FOOD_LIFETIME = 21;
+/** Consume (E) food-sense overlay duration (screen arrows). */
+const ROGUE_FOOD_SENSE_DURATION = 2.35;
+/** World px: at or inside this distance to food, arrow size is maxed (no growth when closer). */
+const ROGUE_FOOD_ARROW_CLOSE_PLATEAU = 96;
+/** World px: beyond this, food-sense arrows use minimum size. */
+const ROGUE_FOOD_ARROW_FAR_LEN = 440;
+/** Rogue move speed bonus when starving; linear up to this fraction at 0 hunger. */
+const ROGUE_DESPERATION_SPEED_MAX = 0.2;
 const CAMERA_FOLLOW_LERP = 0.18;
 
 const CHARACTERS = {
@@ -71,7 +83,7 @@ const CHARACTERS = {
     abilities: {
       dash: { key: "q", label: "Dash", cooldown: 2.2, minCooldown: 0.25 },
       burst: { key: "w", label: "Smoke", cooldown: 16, minCooldown: 1, duration: 3 },
-      decoy: { key: "e", label: "Consume", cooldown: 4, minCooldown: 0.5 },
+      decoy: { key: "e", label: "Consume", cooldown: 4.5, minCooldown: 0.5 },
       random: { key: "r", label: "Ultimate" },
     },
   },
@@ -730,6 +742,26 @@ function collidesAnyObstacle(circle) {
     if (intersectsRectCircle(circle, obstacle)) return true;
   }
   return false;
+}
+
+/** After clubs burst (or any) phase-through ends inside a wall, snap to nearest free spot. */
+function ejectPlayerFromObstaclesIfStuck() {
+  const c = { x: player.x, y: player.y, r: player.r };
+  if (!collidesAnyObstacle(c)) return;
+  const STEP = 3;
+  const ANGLES = 28;
+  const MAX_R = 220;
+  for (let rad = STEP; rad <= MAX_R; rad += STEP) {
+    for (let i = 0; i < ANGLES; i++) {
+      const ang = (i / ANGLES) * TAU;
+      const cand = { x: player.x + Math.cos(ang) * rad, y: player.y + Math.sin(ang) * rad, r: player.r };
+      if (!collidesAnyObstacle(cand)) {
+        player.x = cand.x;
+        player.y = cand.y;
+        return;
+      }
+    }
+  }
 }
 
 function isPointNearTerrain(x, y, extraRadius = 40) {
@@ -1557,8 +1589,8 @@ function spawnRogueFood() {
     y: point.y,
     r: 13,
     bornAt: state.elapsed,
-    expiresAt: state.elapsed + 20,
-    nutrition: 40,
+    expiresAt: state.elapsed + ROGUE_FOOD_LIFETIME,
+    nutrition: ROGUE_FOOD_HUNGER_RESTORE,
   });
 }
 
@@ -1611,8 +1643,11 @@ function updateRogueNeeds(simDt, moving, touchedObstacle) {
     }
     const rr = f.r + player.r;
     if (distSq(f, player) <= rr * rr) {
-      // Food restores hunger up to the 40s mark (not a full 60s refill).
-      state.rogueHunger = Math.min(state.rogueHungerMax, Math.max(state.rogueHunger, f.nutrition ?? 40));
+      // Food restores hunger up to ROGUE_FOOD_HUNGER_RESTORE (not a full max refill).
+      state.rogueHunger = Math.min(
+        state.rogueHungerMax,
+        Math.max(state.rogueHunger, f.nutrition ?? ROGUE_FOOD_HUNGER_RESTORE)
+      );
       spawnHealPopup(player.x, player.y - player.r - 8, "Fed", "#fcd34d");
       entities.foods.splice(i, 1);
     }
@@ -1820,7 +1855,7 @@ function tryDecoy() {
   if (state.elapsed < ability.nextReadyAt || !state.running) return;
   if (selectedCharacter.id === "rogue") {
     ability.nextReadyAt = state.elapsed + Math.max(ability.minCooldown ?? 0.5, ability.cooldown);
-    state.rogueFoodSenseUntil = Math.max(state.rogueFoodSenseUntil, state.elapsed + 2.8);
+    state.rogueFoodSenseUntil = Math.max(state.rogueFoodSenseUntil, state.elapsed + ROGUE_FOOD_SENSE_DURATION);
     return;
   }
   const decoyEmpower = inventory.diamondEmpower === "decoyLead";
@@ -2644,7 +2679,13 @@ function update(dt) {
   const burstBonus = Math.max(0, Math.max(wBurstMult, ultSpeedMult) - 1);
   const passiveBonus = Math.max(0, passive.speedMult - 1);
   const terrainBonus = Math.max(0, terrainMult - 1);
-  const speedMult = 1 + burstBonus + passiveBonus + terrainBonus;
+  const hungerLeftRatio =
+    selectedCharacter.id === "rogue"
+      ? clamp(state.rogueHunger / Math.max(0.001, state.rogueHungerMax), 0, 1)
+      : 1;
+  const rogueDesperationSpeed =
+    selectedCharacter.id === "rogue" ? (1 - hungerLeftRatio) * ROGUE_DESPERATION_SPEED_MAX : 0;
+  const speedMult = 1 + burstBonus + passiveBonus + terrainBonus + rogueDesperationSpeed;
   const effectiveSpeed = player.speed * speedMult * playerSpeedHealthMultiplier();
   const moving = mx !== 0 || my !== 0;
   const phaseThrough =
@@ -2653,6 +2694,9 @@ function update(dt) {
   const moveRes = moveCircleWithCollisions(player, mx * effectiveSpeed, my * effectiveSpeed, dt, {
     ignoreObstacles: phaseThrough,
   });
+  if (!phaseThrough && collidesAnyObstacle(player)) {
+    ejectPlayerFromObstaclesIfStuck();
+  }
   if (moving && moveRes.touchedObstacle && passive.obstacleTouchMult > 1) {
     inventory.spadesObstacleBoostUntil = state.elapsed + TERRAIN_SPEED_BOOST_LINGER;
   }
@@ -2912,19 +2956,33 @@ function render(tsMs) {
   }
 
   for (const food of entities.foods) {
+    const lifeTotal = Math.max(0.001, food.expiresAt - food.bornAt);
+    const lifeLeft = clamp((food.expiresAt - state.elapsed) / lifeTotal, 0, 1);
+    const freshness = lifeLeft;
+    const foodVis = 0.55 + 0.45 * freshness;
+
     const d = Math.hypot(food.x - player.x, food.y - player.y);
     const near = clamp(1 - d / 360, 0, 1);
     const sense = state.elapsed < state.rogueFoodSenseUntil ? 1 : 0;
     const rr = food.r * (1 + near * 0.28 * sense);
-    drawCircle(ctx, food.x, food.y, rr, "#f59e0b", 0.9);
-    drawCircle(ctx, food.x, food.y, rr * 0.45, "#fef3c7", 0.85);
+    drawCircle(ctx, food.x, food.y, rr, "#f59e0b", 0.9 * foodVis);
+    drawCircle(ctx, food.x, food.y, rr * 0.45, "#fef3c7", 0.85 * foodVis);
     if (sense > 0) {
-      ctx.strokeStyle = "rgba(252, 211, 77, 0.7)";
+      ctx.strokeStyle = `rgba(252, 211, 77, ${(0.45 + near * 0.35) * (0.42 + 0.58 * freshness)})`;
       ctx.lineWidth = 1.5;
       ctx.beginPath();
       ctx.arc(food.x, food.y, rr + 5 + near * 4, 0, TAU);
       ctx.stroke();
     }
+
+    const barW = 34;
+    const barH = 4;
+    const bx = food.x - barW / 2;
+    const by = food.y + food.r + 8;
+    ctx.fillStyle = "rgba(148, 163, 184, 0.32)";
+    ctx.fillRect(bx, by, barW, barH);
+    ctx.fillStyle = lifeLeft > 0.35 ? "#f59e0b" : "#ef4444";
+    ctx.fillRect(bx, by, barW * lifeLeft, barH);
   }
 
   if (selectedCharacter.id === "rogue" && state.rogueStealthActive) {
@@ -3362,19 +3420,30 @@ function render(tsMs) {
     const px = player.x - cameraX + shake.x;
     const py = player.y - cameraY + shake.y;
     for (const food of entities.foods) {
+      const lifeTotal = Math.max(0.001, food.expiresAt - food.bornAt);
+      const freshness = clamp((food.expiresAt - state.elapsed) / lifeTotal, 0, 1);
       const dx = food.x - player.x;
       const dy = food.y - player.y;
       const len = Math.hypot(dx, dy) || 1;
       const ux = dx / len;
       const uy = dy / len;
-      const near = clamp(1 - len / 420, 0, 1);
-      const reach = 48 + near * 22;
+      const close =
+        len <= ROGUE_FOOD_ARROW_CLOSE_PLATEAU
+          ? 1
+          : clamp(
+              1 - (len - ROGUE_FOOD_ARROW_CLOSE_PLATEAU) / Math.max(0.001, ROGUE_FOOD_ARROW_FAR_LEN - ROGUE_FOOD_ARROW_CLOSE_PLATEAU),
+              0,
+              1
+            );
+      const reach = 44 + close * 22;
       const tipX = px + ux * reach;
       const tipY = py + uy * reach;
       const sideX = -uy;
       const sideY = ux;
-      const s = 7 + near * 4;
-      ctx.fillStyle = `rgba(252, 211, 77, ${0.45 + near * 0.5})`;
+      const s = 5.5 + close * 6.5;
+      const freshAlpha = 0.54 + 0.4 * freshness;
+      const a = Math.min(0.94, Math.max(0.48, freshAlpha));
+      ctx.fillStyle = `rgba(252, 211, 77, ${a})`;
       ctx.beginPath();
       ctx.moveTo(tipX, tipY);
       ctx.lineTo(tipX - ux * (s * 1.8) + sideX * s, tipY - uy * (s * 1.8) + sideY * s);
