@@ -1122,26 +1122,30 @@
     function characterTutorialHtml(id) {
       const k = CHARACTERS.knight.abilities;
       const r = CHARACTERS.rogue.abilities;
+      const stock = `
+    <p class="character-detail-lead"><strong>Hit points</strong> \u2014 damage chips away at your life; at zero the run ends. <strong>Items</strong> \u2014 pickups on the map make you stronger over time; grab what you find and get a feel for how they shift your tempo. <strong>Health crystals</strong> \u2014 restore HP when you need breathing room.</p>
+  `;
       if (id === "knight") {
         return `
-      <p class="character-detail-lead">Sturdy starter: higher HP and a straightforward kit for learning waves and the map.</p>
+      ${stock}
+      <p class="character-detail-lead" style="margin-top:12px">The <strong>Knight</strong> is a sturdy all-rounder: forgiving HP and a simple rhythm for learning waves, spacing, and how the arena moves.</p>
       <ul>
-        <li><strong>${k.dash.key.toUpperCase()} \u2014 ${k.dash.label}:</strong> quick reposition through (most) obstacles.</li>
-        <li><strong>${k.burst.key.toUpperCase()} \u2014 ${k.burst.label}:</strong> speed burst that shoves nearby hunters. With the <strong>Clubs 3-card set</strong>, you can walk through walls for the burst duration\u2014if it ends inside a wall, you are pushed to the nearest open spot.</li>
-        <li><strong>${k.decoy.key.toUpperCase()} \u2014 ${k.decoy.label}:</strong> drops a decoy to pull enemies off you.</li>
-        <li><strong>${k.random.key.toUpperCase()} \u2014 ${k.random.label}:</strong> random ultimate (ammo on the bar).</li>
+        <li><strong>Q \u2014 ${k.dash.label}:</strong> quick dart through gaps to slip out of pressure.</li>
+        <li><strong>W \u2014 ${k.burst.label}:</strong> short speed surge that shoves hunters aside\u2014break chokes or sprint to safety.</li>
+        <li><strong>E \u2014 ${k.decoy.label}:</strong> drops a lure so hunters fixate elsewhere while you reposition.</li>
       </ul>
-      <p class="character-detail-lead" style="margin-top:10px">Grab heal orbs and suit cards\u2014passives stack. Pause: Space \xB7 After death, restart: R.</p>
+      <p class="character-detail-lead" style="margin-top:10px">Pause: Space \xB7 Restart: R.</p>
     `;
       }
       if (id === "rogue") {
         return `
-      <p class="character-detail-lead">Glass cannon: <strong>${CHARACTERS.rogue.baseHp} HP</strong>. <strong>Hunger</strong> always ticks down\u2014at <strong>0</strong> you lose. Pick up <strong>food</strong> (orange orbs); eating sets hunger to at least <strong>${ROGUE_FOOD_HUNGER_RESTORE}s</strong> (not a full refill). You move faster when hunger is very low.</p>
+      ${stock}
+      <p class="character-detail-lead" style="margin-top:12px">The <strong>Hungry Rogue</strong> is always hungry and dies if he is not fed. Chase food across the arena to stay alive.</p>
       <ul>
-        <li><strong>${r.dash.key.toUpperCase()} \u2014 ${r.dash.label}:</strong> hold to aim your dash, release to go. (Diamonds 3-set: longer dash and larger smoke.)</li>
-        <li><strong>${r.burst.key.toUpperCase()} \u2014 ${r.burst.label}:</strong> deploys a smoke zone. You can <strong>stealth</strong> while hugging nearby terrain or inside smoke; hunter line-of-sight and sniper rules differ from the Knight.</li>
-        <li><strong>${r.decoy.key.toUpperCase()} \u2014 ${r.decoy.label}:</strong> briefly highlights food with on-screen arrows; use it when you are starving.</li>
-        <li><strong>${r.random.key.toUpperCase()} \u2014 ${r.random.label}:</strong> random ultimate charges, same control idea as the Knight.</li>
+        <li><strong>Passive:</strong> when you break line of sight on pursuers, you can enter stealth. Hug a wall while stealthed and you can stay hidden even across open sightlines\u2014use corners and cover to slip past danger.</li>
+        <li><strong>Q \u2014 ${r.dash.label}:</strong> hold to aim a direction, release to snap forward in a quick dash\u2014your main burst of movement to dodge shots, round corners, or close distance.</li>
+        <li><strong>W \u2014 ${r.burst.label}:</strong> throws a smoke bomb that leaves a lingering cloud\u2014fight inside it or chain it with walls to control where you are visible.</li>
+        <li><strong>E \u2014 ${r.decoy.label}:</strong> for a short window, on-screen cues point toward nearby food\u2014use it when you are low and need to find the next bite fast.</li>
       </ul>
       <p class="character-detail-lead" style="margin-top:10px">The top-left <strong>Fed</strong> bar and the arcs around your hero show hunger and stealth grace. Pause: Space \xB7 Restart: R.</p>
     `;
