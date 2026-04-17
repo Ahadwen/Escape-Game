@@ -552,7 +552,11 @@ function getSetBonusLines() {
     );
   }
   if (suits.spades >= 3) {
-    lines.push("Set bonus! Spades: on stealth landing, +0.1s stealth (dash that moves while hidden).");
+    lines.push(
+      selectedCharacter.id === "rogue"
+        ? "Set bonus! Spades: dash from stealth snaps you back into stealth on landing (extra grace to hug cover)."
+        : "Set bonus! Spades: on stealth landing, brief decoy-style slip (dash while hidden)."
+    );
   }
   return lines;
 }
@@ -562,6 +566,10 @@ function renderCardModal() {
   if (!state.inventoryModalOpen) {
     cardModal.classList.remove("open");
     if (modalSetBonusStatusEl) modalSetBonusStatusEl.textContent = "";
+    // Tear down swap UI so no stale drag/drop listeners or half-finished drags survive across runs.
+    cardSwapRow.innerHTML = "";
+    cardModalFace.classList.remove("compact");
+    cardModalFace.innerHTML = "";
     return;
   }
   cardModal.classList.add("open");
@@ -1059,9 +1067,12 @@ function wireCharacterSelect() {
     return;
   }
 
+  const flowPickEl = characterSelectModal.querySelector("#character-select-flow-pick");
+  const howtoPanelEl = characterSelectModal.querySelector("#character-select-howto-panel");
+  const howtoOpenBtn = characterSelectModal.querySelector("#character-how-to-play-button");
+  const howtoBackBtn = characterSelectModal.querySelector("#character-howto-back-button");
   const pick = characterSelectModal.querySelector("#character-select-pick");
   const confirm = characterSelectModal.querySelector("#character-select-confirm");
-  const stockEl = characterSelectModal.querySelector("#character-select-stock");
   const detailEl = characterSelectModal.querySelector("#character-detail");
   const confirmBtn = characterSelectModal.querySelector("#character-confirm-button");
   const backBtn = characterSelectModal.querySelector("#character-back-button");
@@ -1071,9 +1082,16 @@ function wireCharacterSelect() {
 
   function showPick() {
     pendingCharacterId = null;
-    if (pick) pick.hidden = false;
+    if (flowPickEl) flowPickEl.hidden = false;
+    if (howtoPanelEl) howtoPanelEl.hidden = true;
     if (confirm) confirm.hidden = true;
-    if (stockEl) stockEl.hidden = false;
+  }
+
+  function showHowToPlay() {
+    if (flowPickEl) flowPickEl.hidden = true;
+    if (howtoPanelEl) howtoPanelEl.hidden = false;
+    if (confirm) confirm.hidden = true;
+    if (howtoBackBtn) howtoBackBtn.focus();
   }
 
   function showConfirm(id) {
@@ -1086,9 +1104,9 @@ function wireCharacterSelect() {
     pendingCharacterId = id;
     titleEl.textContent = `Confirm — ${ch.name}`;
     detailEl.innerHTML = characterTutorialHtml(id);
-    pick.hidden = true;
+    if (flowPickEl) flowPickEl.hidden = true;
+    if (howtoPanelEl) howtoPanelEl.hidden = true;
     confirm.hidden = false;
-    if (stockEl) stockEl.hidden = true;
     if (confirmBtn) confirmBtn.focus();
   }
 
@@ -1105,6 +1123,8 @@ function wireCharacterSelect() {
       if (pendingCharacterId) startGameWithCharacter(pendingCharacterId);
     });
     backBtn.addEventListener("click", showPick);
+    if (howtoOpenBtn) howtoOpenBtn.addEventListener("click", showHowToPlay);
+    if (howtoBackBtn) howtoBackBtn.addEventListener("click", showPick);
   } else {
     for (const btn of characterSelectOptions) {
       btn.addEventListener("click", () => {
@@ -1121,6 +1141,11 @@ function lootSpawnIntervalScale() {
 }
 
 function resetGame() {
+  if (typeof document !== "undefined" && document.activeElement instanceof HTMLElement) {
+    if (cardModal?.contains(document.activeElement)) document.activeElement.blur();
+  }
+  state.keys.clear();
+  tileCache.clear();
   state.running = true;
   state.elapsed = 0;
   state.lastTime = 0;
@@ -1864,10 +1889,23 @@ function tryDash() {
     player.x = target.x;
     player.y = target.y;
     if (spadesCount >= 3 && wasStealthed) {
-      inventory.spadesLandingStealthUntil = Math.max(
-        inventory.spadesLandingStealthUntil,
-        state.elapsed + 0.1
-      );
+      if (selectedCharacter.id === "rogue") {
+        // Spades 3-set: actually re-enter stealth so patrol AI / HUD / contact rules match "stealth landing".
+        state.rogueStealthActive = true;
+        state.rogueStealthOpenUntil = Math.max(
+          state.rogueStealthOpenUntil,
+          state.elapsed + ROGUE_STEALTH_OPEN_GRACE + 0.12
+        );
+        inventory.spadesLandingStealthUntil = Math.max(
+          inventory.spadesLandingStealthUntil,
+          state.rogueStealthOpenUntil
+        );
+      } else {
+        inventory.spadesLandingStealthUntil = Math.max(
+          inventory.spadesLandingStealthUntil,
+          state.elapsed + 0.12
+        );
+      }
     }
   }
 }
@@ -3634,6 +3672,12 @@ window.addEventListener("keydown", (event) => {
   const key = event.key.toLowerCase();
   if (key.startsWith("arrow")) event.preventDefault();
   if (!gameStarted) return;
+  // Restart must run before movement-resume / other guards so R never "sticks" after a card session.
+  if (key === abilities.random.key && !state.running) {
+    resetGame();
+    event.preventDefault();
+    return;
+  }
   if (state.manualPause) {
     const resumeGameplay =
       key.startsWith("arrow") || key === abilities.dash.key || key === abilities.burst.key || key === abilities.decoy.key || key === abilities.random.key;
@@ -3660,7 +3704,6 @@ window.addEventListener("keydown", (event) => {
   }
   if (key.startsWith("arrow")) state.keys.add(key);
   onAbilityKey(key);
-  if (key === abilities.random.key && !state.running) resetGame();
 });
 
 window.addEventListener("keyup", (event) => {

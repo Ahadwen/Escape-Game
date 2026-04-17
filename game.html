@@ -401,14 +401,6 @@
         font-size: 13px;
       }
 
-      .character-select-stock {
-        margin: 0 0 14px;
-      }
-
-      .character-select-stock .character-detail-lead {
-        margin-bottom: 0;
-      }
-
       .character-option {
         width: 100%;
         text-align: left;
@@ -500,6 +492,26 @@
       .character-secondary-btn:hover {
         background: rgba(51, 65, 85, 0.95);
       }
+
+      .character-howto-open {
+        width: 100%;
+        margin: 0 0 12px;
+        box-sizing: border-box;
+      }
+
+      .character-select-howto {
+        margin-top: 4px;
+      }
+
+      .character-howto-title {
+        margin: 0 0 12px;
+        font-size: 18px;
+        color: #e2e8f0;
+      }
+
+      .character-howto-back {
+        margin-top: 14px;
+      }
     </style>
   </head>
   <body>
@@ -575,25 +587,55 @@
     <div id="character-select-modal" class="character-select-modal" aria-label="Character select" aria-live="polite">
       <div class="character-select-inner">
         <h2 class="character-select-title">Choose Character</h2>
-        <p class="character-select-sub">Select a hero to see their full kit, then confirm to start.</p>
 
-        <div id="character-select-stock" class="character-select-stock character-detail" aria-label="Core rules">
-          <p class="character-detail-lead">
-            <strong>Hit points</strong> — damage chips away at your life; at zero the run ends.
-            <strong>Items</strong> — pickups on the map make you stronger over time; grab what you find and get a feel for how they shift your tempo.
-            <strong>Health crystals</strong> — restore HP when you need breathing room.
-          </p>
+        <div id="character-select-flow-pick">
+          <p class="character-select-sub">Select a hero to see their full kit, then confirm to start.</p>
+          <button type="button" id="character-how-to-play-button" class="character-secondary-btn character-howto-open">
+            How to play
+          </button>
+          <div id="character-select-pick">
+            <button type="button" class="character-option" data-character-id="knight">
+              <span class="title">Knight</span>
+              <span class="meta">Balanced · 10 HP · classic kit</span>
+            </button>
+            <button type="button" class="character-option" data-character-id="rogue" style="margin-top: 10px">
+              <span class="title">Hungry Rogue</span>
+              <span class="meta">High risk · hunger · stealth &amp; smoke</span>
+            </button>
+          </div>
         </div>
 
-        <div id="character-select-pick">
-          <button type="button" class="character-option" data-character-id="knight">
-            <span class="title">Knight</span>
-            <span class="meta">Balanced · 10 HP · classic kit</span>
-          </button>
-          <button type="button" class="character-option" data-character-id="rogue" style="margin-top: 10px">
-            <span class="title">Hungry Rogue</span>
-            <span class="meta">High risk · hunger · stealth &amp; smoke</span>
-          </button>
+        <div id="character-select-howto-panel" class="character-select-howto character-detail" hidden aria-label="How to play">
+          <h3 class="character-howto-title">How to play</h3>
+          <p class="character-detail-lead">
+            Core rules for survival, loot, and the card system. Use <strong>Back</strong> when you are ready to pick a hero.
+          </p>
+          <ul>
+            <li>
+              <strong>Hit points &amp; health</strong> — you have a life total shown on the HUD. Enemy hits and hazards chip it
+              down; at <strong>0 HP</strong> the run ends. Some effects grant temporary extra protection.
+            </li>
+            <li>
+              <strong>Health crystals</strong> — green pickups on the map restore HP so you can recover after a bad trade.
+            </li>
+            <li>
+              <strong>Ultimate (R)</strong> — as you play, your ultimate bar fills with a random kit piece (shield, big push,
+              timelock, or heal). Press <strong>R</strong> when you have charges to spend it; after death, <strong>R</strong> also
+              restarts the run.
+            </li>
+            <li>
+              <strong>Items (suit cards)</strong> — floating cards are gear. Touch one to open the pickup flow: place the card in
+              an active slot or your backpack, or swap with what you already carry. Each card applies a passive from its rank and
+              suit; read the card text to see exactly what it does.
+            </li>
+            <li>
+              <strong>Set bonuses</strong> — collecting <strong>three cards of the same suit</strong> in your three active slots
+              unlocks a extra bonus for that suit (shown under your slots during a run). Diamonds can offer a one-time choice for
+              the Knight; Hearts, Clubs, and Spades each have their own payoff, and some bonuses read differently on the Hungry
+              Rogue.
+            </li>
+          </ul>
+          <button type="button" id="character-howto-back-button" class="character-secondary-btn character-howto-back">Back</button>
         </div>
 
         <div id="character-select-confirm" hidden>
