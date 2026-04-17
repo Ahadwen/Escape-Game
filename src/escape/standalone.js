@@ -3,12 +3,12 @@
   var TAU = Math.PI * 2;
   var TILE_W = 560;
   var BLOCK = 35;
-  var CAMERA_PAN_SPEED = 900;
   var HEAL_PICKUP_HIT_R = 24;
   var HEAL_PICKUP_PLUS_HALF = 13;
   var HEAL_PICKUP_ARM_THICK = 6;
   var SNIPER_ARTILLERY_WINDUP = 1.38;
-  var SNIPER_ARTILLERY_LEAD = 0.94;
+  var SNIPER_ARTILLERY_LEAD = 0.82;
+  var SNIPER_ARTILLERY_BANG_DURATION = 0.34;
   function tileGridDims(viewH) {
     return {
       TILE_COLS: Math.floor(TILE_W / BLOCK),
@@ -71,14 +71,49 @@
     }
     return points.map((p) => ({ x: p.x - minX, y: p.y - minY }));
   }
-  function generateTileObstacles(tileIndex, d) {
-    const { TILE_COLS, TILE_ROWS, TILE_W: TILE_W2, BLOCK: BLOCK2 } = d;
-    const rng = makeRng(tileIndex * 2654435761);
+  function generateHexTileObstacles(q, r, d) {
+    const { BLOCK: BLOCK2, centerX, centerY, hexSize } = d;
+    const SQRT3 = Math.sqrt(3);
+    const halfW = SQRT3 * hexSize / 2;
+    const halfH = hexSize;
+    const TILE_COLS = Math.max(8, Math.ceil(halfW * 2 / BLOCK2));
+    const TILE_ROWS = Math.max(8, Math.ceil(halfH * 2 / BLOCK2));
+    const seed = q * 73856093 ^ r * 19349663 | 0;
+    const rng = makeRng(seed);
     const grid = Array.from({ length: TILE_ROWS }, () => Array(TILE_COLS).fill(false));
-    const topClearRows = 3;
-    const bottomClearRows = 3;
-    const minRow = topClearRows;
-    const maxRow = TILE_ROWS - bottomClearRows - 1;
+    const inHex = Array.from({ length: TILE_ROWS }, () => Array(TILE_COLS).fill(false));
+    const minRow = 0;
+    const maxRow = TILE_ROWS - 1;
+    const baseX = centerX - halfW;
+    const baseY = centerY - halfH;
+    function worldToHexRounded(x, y) {
+      const qf = (SQRT3 / 3 * x - 1 / 3 * y) / hexSize;
+      const rf = 2 / 3 * y / hexSize;
+      let xCube = qf;
+      let zCube = rf;
+      let yCube = -xCube - zCube;
+      let rx = Math.round(xCube);
+      let ry = Math.round(yCube);
+      let rz = Math.round(zCube);
+      const xDiff = Math.abs(rx - xCube);
+      const yDiff = Math.abs(ry - yCube);
+      const zDiff = Math.abs(rz - zCube);
+      if (xDiff > yDiff && xDiff > zDiff) rx = -ry - rz;
+      else if (yDiff > zDiff) ry = -rx - rz;
+      else rz = -rx - ry;
+      return { q: rx, r: rz };
+    }
+    let maskCount = 0;
+    for (let row = 0; row < TILE_ROWS; row++) {
+      for (let col = 0; col < TILE_COLS; col++) {
+        const cx = baseX + col * BLOCK2 + BLOCK2 * 0.5;
+        const cy = baseY + row * BLOCK2 + BLOCK2 * 0.5;
+        const owner = worldToHexRounded(cx, cy);
+        const inside = owner.q === q && owner.r === r;
+        inHex[row][col] = inside;
+        if (inside) maskCount++;
+      }
+    }
     const tetrominoes = [
       [{ x: 0, y: 0 }, { x: 1, y: 0 }, { x: 2, y: 0 }, { x: 3, y: 0 }],
       [{ x: 0, y: 0 }, { x: 1, y: 0 }, { x: 0, y: 1 }, { x: 1, y: 1 }],
@@ -89,34 +124,9 @@
       [{ x: 0, y: 0 }, { x: 1, y: 0 }, { x: 1, y: 1 }, { x: 2, y: 1 }]
     ];
     let filled = 0;
-    const targetBlocks = 72 + Math.floor(rng() * 28);
-    function stampTetrominoAtEdge(side) {
-      const base = tetrominoes[Math.floor(rng() * tetrominoes.length)];
-      let points = base.map((p) => ({ ...p }));
-      const rotations = Math.floor(rng() * 4);
-      for (let i = 0; i < rotations; i++) points = rotatePoints(points);
-      points = normalizePoints(points);
-      const maxX = Math.max(...points.map((p) => p.x));
-      const maxY = Math.max(...points.map((p) => p.y));
-      const originX = side === "left" ? 0 : TILE_COLS - (maxX + 1);
-      const originYMin = minRow;
-      const originYMax = maxRow - maxY;
-      if (originYMax < originYMin) return;
-      const originY = originYMin + Math.floor(rng() * (originYMax - originYMin + 1));
-      for (const p of points) {
-        const gx = originX + p.x;
-        const gy = originY + p.y;
-        if (gx < 0 || gx >= TILE_COLS || gy < minRow || gy > maxRow) continue;
-        if (!grid[gy][gx]) {
-          grid[gy][gx] = true;
-          filled++;
-        }
-      }
-    }
-    stampTetrominoAtEdge("left");
-    stampTetrominoAtEdge("right");
+    const targetBlocks = Math.floor(maskCount * (0.145 + rng() * 0.04));
     let safety = 0;
-    while (filled < targetBlocks && safety < 380) {
+    while (filled < targetBlocks && safety < 620) {
       safety++;
       const base = tetrominoes[Math.floor(rng() * tetrominoes.length)];
       let points = base.map((p) => ({ ...p }));
@@ -125,7 +135,7 @@
       points = normalizePoints(points);
       const maxX = Math.max(...points.map((p) => p.x));
       const maxY = Math.max(...points.map((p) => p.y));
-      const originX = Math.floor(rng() * (TILE_COLS - (maxX + 1)));
+      const originX = Math.floor(rng() * Math.max(1, TILE_COLS - (maxX + 1)));
       const originYMin = minRow;
       const originYMax = maxRow - maxY;
       if (originYMax < originYMin) continue;
@@ -134,11 +144,7 @@
       for (const p of points) {
         const gx = originX + p.x;
         const gy = originY + p.y;
-        if (gx < 0 || gx >= TILE_COLS || gy < minRow || gy > maxRow) {
-          ok = false;
-          break;
-        }
-        if (grid[gy][gx]) {
+        if (gx < 0 || gx >= TILE_COLS || gy < minRow || gy > maxRow || grid[gy][gx] || !inHex[gy][gx]) {
           ok = false;
           break;
         }
@@ -151,33 +157,31 @@
         filled++;
       }
     }
-    const verticalCorridors = [
-      Math.floor(TILE_COLS * 0.2 + rng() * 2),
-      Math.floor(TILE_COLS * 0.5 + rng() * 2 - 1),
-      Math.floor(TILE_COLS * 0.8 + rng() * 2 - 2)
-    ];
-    for (const center of verticalCorridors) {
-      for (let c = center - 1; c <= center + 1; c++) {
-        if (c < 0 || c >= TILE_COLS) continue;
-        for (let r = minRow; r <= maxRow; r++) grid[r][c] = false;
+    for (let i = 0; i < 5; i++) {
+      const c = Math.floor(rng() * TILE_COLS);
+      const start = Math.floor(rng() * TILE_ROWS);
+      const len = Math.floor(TILE_ROWS * (0.45 + rng() * 0.35));
+      for (let k = 0; k < len; k++) {
+        const rr = start + k;
+        if (rr < 0 || rr >= TILE_ROWS) continue;
+        if (inHex[rr][c]) grid[rr][c] = false;
       }
     }
-    const horizontalCorridors = [
-      Math.floor(minRow + (maxRow - minRow) * 0.3),
-      Math.floor(minRow + (maxRow - minRow) * 0.62)
-    ];
-    for (const center of horizontalCorridors) {
-      for (let r = center; r <= center + 1; r++) {
-        if (r < minRow || r > maxRow) continue;
-        for (let c = 0; c < TILE_COLS; c++) grid[r][c] = false;
+    for (let i = 0; i < 5; i++) {
+      const row = minRow + Math.floor(rng() * Math.max(1, maxRow - minRow + 1));
+      const start = Math.floor(rng() * TILE_COLS);
+      const len = Math.floor(TILE_COLS * (0.45 + rng() * 0.35));
+      for (let k = 0; k < len; k++) {
+        const cc = start + k;
+        if (cc < 0 || cc >= TILE_COLS) continue;
+        if (inHex[row][cc]) grid[row][cc] = false;
       }
     }
     const rects = [];
-    const baseX = tileIndex * TILE_W2;
-    for (let r = minRow; r <= maxRow; r++) {
+    for (let rr = minRow; rr <= maxRow; rr++) {
       for (let c = 0; c < TILE_COLS; c++) {
-        if (!grid[r][c]) continue;
-        rects.push({ x: baseX + c * BLOCK2, y: r * BLOCK2, w: BLOCK2, h: BLOCK2 });
+        if (!grid[rr][c] || !inHex[rr][c]) continue;
+        rects.push({ x: baseX + c * BLOCK2, y: baseY + rr * BLOCK2, w: BLOCK2, h: BLOCK2 });
       }
     }
     return rects;
@@ -258,33 +262,87 @@
     const VIEW_H = world.h;
     const { TILE_COLS, TILE_ROWS } = tileGridDims(world.h);
     const DEATH_ANIM_DURATION = 0.42;
-    const CARD_SPAWN_INTERVAL = 12;
+    const PICKUP_SPAWN_INTERVAL = 3.2;
+    const CARD_SPAWN_INTERVAL = 8.5;
+    const LOOT_DENSITY_BASE_ACTIVE_HEXES = 3;
+    const TERRAIN_SPEED_BOOST_LINGER = 0.16;
+    const CAMERA_FOLLOW_LERP = 0.18;
     let obstacles = [];
-    let activeTileMinX = 0;
-    let activeTileMaxX = VIEW_W;
-    let activePlayerTile = 0;
+    let activePlayerHex = { q: 0, r: 0 };
+    let activeHexes = [];
     let cameraX = 0;
-    let cameraPanDir = 0;
-    let cameraOffset = 0;
-    let lastTileIndex = null;
+    let cameraY = 0;
+    let lastPlayerHexKey = null;
     const tileCache = /* @__PURE__ */ new Map();
+    const HEX_SIZE = TILE_W * 1.15;
+    const SQRT3 = Math.sqrt(3);
+    const HEX_DIRS = [
+      { q: 1, r: 0 },
+      { q: 1, r: -1 },
+      { q: 0, r: -1 },
+      { q: -1, r: 0 },
+      { q: -1, r: 1 },
+      { q: 0, r: 1 }
+    ];
+    function hexToWorld(q, r) {
+      return {
+        x: HEX_SIZE * SQRT3 * (q + r / 2),
+        y: HEX_SIZE * 1.5 * r
+      };
+    }
+    function worldToHex(x, y) {
+      const qf = (SQRT3 / 3 * x - 1 / 3 * y) / HEX_SIZE;
+      const rf = 2 / 3 * y / HEX_SIZE;
+      let xCube = qf;
+      let zCube = rf;
+      let yCube = -xCube - zCube;
+      let rx = Math.round(xCube);
+      let ry = Math.round(yCube);
+      let rz = Math.round(zCube);
+      const xDiff = Math.abs(rx - xCube);
+      const yDiff = Math.abs(ry - yCube);
+      const zDiff = Math.abs(rz - zCube);
+      if (xDiff > yDiff && xDiff > zDiff) rx = -ry - rz;
+      else if (yDiff > zDiff) ry = -rx - rz;
+      else rz = -rx - ry;
+      return { q: rx, r: rz };
+    }
+    function hexKey(q, r) {
+      return `${q},${r}`;
+    }
     function ensureTilesForPlayer() {
-      const tileIndex = Math.floor(player.x / TILE_W);
-      activePlayerTile = tileIndex;
-      if (lastTileIndex === tileIndex && obstacles.length) return;
-      lastTileIndex = tileIndex;
-      const needed = [tileIndex - 1, tileIndex, tileIndex + 1];
-      for (const idx of needed) {
-        if (!tileCache.has(idx)) tileCache.set(idx, generateTileObstacles(idx, { TILE_COLS, TILE_ROWS, TILE_W, BLOCK }));
+      const center = worldToHex(player.x, player.y);
+      const centerKey = hexKey(center.q, center.r);
+      activePlayerHex = center;
+      if (lastPlayerHexKey === centerKey && obstacles.length) return;
+      lastPlayerHexKey = centerKey;
+      const needed = [{ q: center.q, r: center.r }, ...HEX_DIRS.map((d) => ({ q: center.q + d.q, r: center.r + d.r }))];
+      activeHexes = needed;
+      for (const h of needed) {
+        const key = hexKey(h.q, h.r);
+        if (!tileCache.has(key)) {
+          const c = hexToWorld(h.q, h.r);
+          tileCache.set(
+            key,
+            generateHexTileObstacles(h.q, h.r, {
+              TILE_COLS,
+              TILE_ROWS,
+              TILE_W,
+              BLOCK,
+              centerX: c.x,
+              centerY: c.y,
+              hexSize: HEX_SIZE
+            })
+          );
+        }
       }
-      for (const idx of Array.from(tileCache.keys())) {
-        if (idx < needed[0] || idx > needed[2]) tileCache.delete(idx);
+      const neededKeys = new Set(needed.map((h) => hexKey(h.q, h.r)));
+      for (const key of Array.from(tileCache.keys())) {
+        if (!neededKeys.has(key)) tileCache.delete(key);
       }
-      activeTileMinX = needed[0] * TILE_W;
-      activeTileMaxX = (needed[2] + 1) * TILE_W;
       obstacles = [];
-      for (const idx of needed) {
-        obstacles = obstacles.concat(tileCache.get(idx));
+      for (const h of needed) {
+        obstacles = obstacles.concat(tileCache.get(hexKey(h.q, h.r)));
       }
     }
     const player = {
@@ -427,9 +485,23 @@
       if (Math.random() < 0.5) return { kind: "speed", value: Math.min(0.25, 0.025 * rank) };
       return { kind: "terrainBoost", value: Math.min(0.25, 0.025 * rank) };
     }
+    function rollCardRankWeighted() {
+      const minW = 0.2;
+      const maxW = 1;
+      const steps = 12;
+      const totalW = (maxW + minW) * 13 / 2;
+      let pick = Math.random() * totalW;
+      for (let rank = 1; rank <= 13; rank++) {
+        const t = (rank - 1) / steps;
+        const w = maxW + (minW - maxW) * t;
+        pick -= w;
+        if (pick <= 0) return rank;
+      }
+      return 13;
+    }
     function makeRandomCard() {
       const suit = randomSuitForDraw();
-      const rank = Math.floor(rand(1, 14));
+      const rank = rollCardRankWeighted();
       return {
         id: `${Date.now()}-${Math.floor(Math.random() * 1e6)}`,
         suit,
@@ -703,7 +775,7 @@
     function showSetBonusChoice() {
     }
     function outOfBoundsCircle(c) {
-      return c.y - c.r < 0 || c.y + c.r > world.h;
+      return false;
     }
     function collidesAnyObstacle(circle) {
       for (const obstacle of obstacles) {
@@ -736,7 +808,6 @@
       for (let d = 8; d <= maxLen; d += 8) {
         const px = x + ux * d;
         const py = y + uy * d;
-        if (py < 0 || py > world.h) return { x: lastX, y: lastY };
         for (const obstacle of obstacles) {
           if (px >= obstacle.x && px <= obstacle.x + obstacle.w && py >= obstacle.y && py <= obstacle.y + obstacle.h) {
             return { x: lastX, y: lastY };
@@ -782,16 +853,54 @@
       player._px = player.x;
       player._py = player.y;
     }
-    function randomOpenPoint(radius, attempts = 80) {
+    function separatedFromExistingLoot(x, y, r, minGap = 68) {
+      for (const p of entities.pickups) {
+        if (Math.hypot(p.x - x, p.y - y) < p.r + r + minGap) return false;
+      }
+      for (const c of entities.cards) {
+        if (Math.hypot(c.x - x, c.y - y) < c.r + r + minGap) return false;
+      }
+      return true;
+    }
+    function spawnLootPointClear(candidate) {
+      if (collidesAnyObstacle(candidate)) return false;
+      if (!separatedFromExistingLoot(candidate.x, candidate.y, candidate.r)) return false;
+      const rr = candidate.r + player.r + 44;
+      if (distSq(candidate, player) <= rr * rr) return false;
+      return true;
+    }
+    function randomOpenPoint(radius, attempts = 96) {
+      const dMin = 96 + radius;
+      const dMax = Math.min(VIEW_W, VIEW_H) * 0.66;
+      const sourceHexes = activeHexes.length ? activeHexes : [{ q: 0, r: 0 }];
       for (let i = 0; i < attempts; i++) {
-        const candidate = {
-          x: rand(activeTileMinX + radius + 6, activeTileMaxX - radius - 6),
-          y: rand(radius + 6, world.h - radius - 6),
-          r: radius
-        };
+        let candidate;
+        if (i % 2 === 0) {
+          const ang = Math.random() * TAU;
+          const d = rand(dMin, dMax);
+          candidate = {
+            x: player.x + Math.cos(ang) * d,
+            y: player.y + Math.sin(ang) * d,
+            r: radius
+          };
+        } else {
+          const h = sourceHexes[Math.floor(Math.random() * sourceHexes.length)];
+          const c = hexToWorld(h.q, h.r);
+          candidate = {
+            x: c.x + rand(-TILE_W * 0.46, TILE_W * 0.46),
+            y: c.y + rand(-TILE_W * 0.46, TILE_W * 0.46),
+            r: radius
+          };
+        }
+        if (spawnLootPointClear(candidate)) return candidate;
+      }
+      for (let j = 0; j < 40; j++) {
+        const ang = Math.random() * TAU;
+        const d = rand(dMin, dMax * 0.92);
+        const candidate = { x: player.x + Math.cos(ang) * d, y: player.y + Math.sin(ang) * d, r: radius };
         if (!collidesAnyObstacle(candidate)) return candidate;
       }
-      return { x: player.x, y: world.h / 2, r: radius };
+      return { x: player.x + rand(-100, 100), y: player.y + rand(-100, 100), r: radius };
     }
     function randomOpenPointAround(cx, cy, radiusMin, radiusMax, r, attempts = 40) {
       for (let i = 0; i < attempts; i++) {
@@ -802,10 +911,14 @@
         if (!collidesAnyObstacle(candidate)) return candidate;
       }
       return {
-        x: clamp(cx, activeTileMinX + r + 2, activeTileMaxX - r - 2),
-        y: clamp(cy, r + 2, world.h - r - 2),
+        x: cx,
+        y: cy,
         r
       };
+    }
+    function lootSpawnIntervalScale() {
+      const activeCount = Math.max(1, activeHexes.length || 1);
+      return Math.max(1, Math.sqrt(activeCount / LOOT_DENSITY_BASE_ACTIVE_HEXES));
     }
     function resetGame() {
       state.running = true;
@@ -815,8 +928,8 @@
       state.spawnInterval = 8;
       state.nextSpawnAt = 3;
       state.spawnScheduled = [];
-      state.nextPickupAt = 3.5;
-      state.nextCardAt = 10;
+      state.nextPickupAt = 2.2;
+      state.nextCardAt = 6.5;
       state.hurtFlash = 0;
       state.damageEvents = [];
       state.snapshotPending = false;
@@ -837,13 +950,10 @@
       state.playerHeadstartUntil = 0;
       player.x = 96;
       player.y = 340;
-      cameraOffset = 0;
-      cameraPanDir = 0;
       obstacles = [];
-      activeTileMinX = 0;
-      activeTileMaxX = VIEW_W;
-      activePlayerTile = 0;
-      lastTileIndex = null;
+      activePlayerHex = { q: 0, r: 0 };
+      activeHexes = [];
+      lastPlayerHexKey = null;
       player.maxHp = 10;
       player.hp = player.maxHp;
       player.facing = { x: 1, y: 0 };
@@ -896,7 +1006,8 @@
       dashState.charges = 1;
       dashState.nextRechargeAt = 0;
       ensureTilesForPlayer();
-      cameraX = clamp(player.x - VIEW_W / 2 + cameraOffset, activeTileMinX, activeTileMaxX - VIEW_W);
+      cameraX = player.x - VIEW_W / 2;
+      cameraY = player.y - VIEW_H / 2;
       renderCardSlots();
       updateSetBonusStatus();
       renderCardModal();
@@ -1063,6 +1174,38 @@
         expiresAt: state.elapsed + duration
       });
     }
+    function drawArtilleryDetonationBang(ctx2, zone, u) {
+      const { x, y, r } = zone;
+      const fade = 1 - u * u;
+      const coreR = r * (0.5 + 0.2 * (1 - u));
+      drawCircle(ctx2, x, y, coreR, "#fef3c7", 0.38 * fade);
+      drawCircle(ctx2, x, y, coreR * 0.42, "#fffbeb", 0.48 * fade);
+      const ringR = r * (0.4 + u * 1.25);
+      ctx2.strokeStyle = `rgba(254, 215, 170, ${0.72 * fade})`;
+      ctx2.lineWidth = 2.6 * (1 - u * 0.45);
+      ctx2.beginPath();
+      ctx2.arc(x, y, ringR, 0, TAU);
+      ctx2.stroke();
+      const u2 = clamp((u - 0.1) / 0.9, 0, 1);
+      if (u2 > 0) {
+        const ringR2 = r * (0.32 + u2 * 1.05);
+        ctx2.strokeStyle = `rgba(248, 113, 113, ${0.58 * (1 - u2 * u2)})`;
+        ctx2.lineWidth = 1.9;
+        ctx2.beginPath();
+        ctx2.arc(x, y, ringR2, 0, TAU);
+        ctx2.stroke();
+      }
+      const haloR = r * (0.72 + u * 0.8);
+      ctx2.strokeStyle = `rgba(255, 247, 237, ${0.36 * fade})`;
+      ctx2.lineWidth = 1.4;
+      ctx2.beginPath();
+      ctx2.arc(x, y, haloR, 0, TAU);
+      ctx2.stroke();
+      if (u < 0.28) {
+        const sparkleT = 1 - u / 0.28;
+        drawCircle(ctx2, x, y, r * 0.28, "#fff7ed", 0.2 * sparkleT);
+      }
+    }
     function spawnUltimateEffect(type, x, y, color, duration, radius) {
       entities.ultimateEffects.push({
         type,
@@ -1202,10 +1345,10 @@
         entities.hunters.push(h);
         return;
       }
-      const tilePick = activePlayerTile + (Math.random() < 1 / 3 ? -1 : Math.random() < 0.5 ? 0 : 1);
-      const edgeTop = Math.random() < 0.5;
-      h.x = tilePick * TILE_W + rand(r + 10, TILE_W - r - 10);
-      h.y = edgeTop ? r + 1 : world.h - r - 1;
+      const ang = Math.random() * TAU;
+      const d = rand(320, 760);
+      h.x = player.x + Math.cos(ang) * d;
+      h.y = player.y + Math.sin(ang) * d;
       entities.hunters.push(h);
     }
     function pickRegularHunterType() {
@@ -1222,31 +1365,17 @@
     }
     function scheduleWaveSpawns() {
       const jobs = [];
-      const tiles = [activePlayerTile - 1, activePlayerTile, activePlayerTile + 1];
-      for (const tileIdx of tiles) {
-        for (let pair = 0; pair < 2; pair++) {
-          const edgeTop = pair === 0;
-          jobs.push(() => {
-            const type = pickRegularHunterType();
-            const r = hunterRadiusForType(type);
-            const x = tileIdx * TILE_W + rand(r + 10, TILE_W - r - 10);
-            const y = edgeTop ? r + 1 : world.h - r - 1;
-            spawnHunter(type, x, y);
-          });
-        }
-      }
-      const sideYFractions = [0.22, 0.4, 0.6, 0.78];
-      for (const side of [-1, 1]) {
-        const tileIdx = activePlayerTile + side;
-        for (const fy of sideYFractions) {
-          jobs.push(() => {
-            const type = pickRegularHunterType();
-            const r = hunterRadiusForType(type);
-            const x = side < 0 ? tileIdx * TILE_W + r + 1 : (tileIdx + 1) * TILE_W - r - 1;
-            const y = clamp(world.h * fy, r + 4, world.h - r - 4);
-            spawnHunter(type, x, y);
-          });
-        }
+      const nJobs = 14;
+      for (let i = 0; i < nJobs; i++) {
+        jobs.push(() => {
+          const type = pickRegularHunterType();
+          const r = hunterRadiusForType(type);
+          const ang = Math.random() * TAU;
+          const d = rand(300, 780);
+          const x = player.x + Math.cos(ang) * d;
+          const y = player.y + Math.sin(ang) * d;
+          spawnHunter(type, x, y);
+        });
       }
       for (let i = jobs.length - 1; i > 0; i--) {
         const j = Math.floor(Math.random() * (i + 1));
@@ -1267,7 +1396,7 @@
     }
     function advanceSpawnWave() {
       state.wave += 1;
-      state.spawnInterval = Math.max(2.5, state.spawnInterval * 0.93);
+      state.spawnInterval = Math.max(1.8, state.spawnInterval * 0.93);
       state.nextSpawnAt = state.elapsed + state.spawnInterval;
       scheduleWaveSpawns();
     }
@@ -1279,8 +1408,8 @@
         r: HEAL_PICKUP_HIT_R,
         plusHalf: HEAL_PICKUP_PLUS_HALF,
         plusThick: HEAL_PICKUP_ARM_THICK,
-        expiresAt: state.elapsed + 6,
-        life: 6,
+        expiresAt: state.elapsed + 7.2,
+        life: 7.2,
         heal: 3
       });
     }
@@ -1304,21 +1433,25 @@
         expiresAt: state.elapsed + 0.6
       });
     }
+    function forEachActiveCard(fn) {
+      for (const card of inventory.cards) {
+        if (card) fn(card);
+      }
+    }
     function getHeartsResistanceCardCount() {
       let n = 0;
-      for (const card of inventory.cards) {
-        if (card?.effect?.kind === "hitResist") n++;
-      }
+      forEachActiveCard((card) => {
+        if (card.effect?.kind === "hitResist") n++;
+      });
       return n;
     }
     function getHeartsResistanceCooldown() {
-      let totalReduction = 0;
-      for (const card of inventory.cards) {
-        const e = card?.effect;
-        if (e?.kind !== "hitResist") continue;
-        totalReduction += Math.max(0, 15 - e.cooldown);
-      }
-      return Math.max(1.5, 15 - totalReduction);
+      let totalRank = 0;
+      forEachActiveCard((card) => {
+        if (card.effect?.kind === "hitResist") totalRank += card.rank;
+      });
+      if (totalRank <= 0) return 15;
+      return Math.max(3, 15 - 0.5 * totalRank);
     }
     function openCardPickupModal(card) {
       state.pausedForCard = true;
@@ -1326,7 +1459,6 @@
       state.waitingForMovementResume = false;
       state.pendingCard = card;
       state.keys.clear();
-      cameraPanDir = 0;
       renderCardModal();
     }
     function updateCardPickups() {
@@ -1810,14 +1942,17 @@
         const tvy = target === player ? player.velY : 0;
         let aimX = target.x + tvx * leadT + rand(-12, 12);
         let aimY = target.y + tvy * leadT + rand(-12, 12);
-        aimX = clamp(aimX, activeTileMinX + 40, activeTileMaxX - 40);
-        aimY = clamp(aimY, 32, world.h - 32);
+        aimX = clamp(aimX, player.x - VIEW_W * 0.9, player.x + VIEW_W * 0.9);
+        aimY = clamp(aimY, player.y - VIEW_H * 0.9, player.y + VIEW_H * 0.9);
         entities.dangerZones.push({
           x: aimX,
           y: aimY,
           r: 28,
           bornAt: state.elapsed,
           detonateAt: state.elapsed + windup,
+          lingerUntil: state.elapsed + windup + 1.8,
+          nextTickAt: state.elapsed + windup + 0.25,
+          tickInterval: 0.3,
           windup,
           exploded: false
         });
@@ -1844,8 +1979,16 @@
             if (distSq(zone, player) <= rr * rr) damagePlayer(2);
           }
         }
+        if (zone.exploded && state.elapsed < (zone.lingerUntil ?? zone.detonateAt) && state.elapsed >= (zone.nextTickAt ?? Infinity)) {
+          zone.nextTickAt += zone.tickInterval ?? 0.3;
+          if (!hitDecoyIfAny(zone, zone.r * 0.92)) {
+            const rr = zone.r * 0.92 + player.r;
+            if (distSq(zone, player) <= rr * rr) damagePlayer(1);
+          }
+        }
         const zu = zone.windup != null ? zone.windup : 0.8;
-        if (state.elapsed - zone.bornAt > zu + 0.48) entities.dangerZones.splice(i, 1);
+        const lingerTotal = Math.max(zu + 0.48, (zone.lingerUntil ?? zone.bornAt) - zone.bornAt);
+        if (state.elapsed - zone.bornAt > lingerTotal) entities.dangerZones.splice(i, 1);
       }
     }
     function updateCollisions() {
@@ -2017,21 +2160,25 @@
         dashState.charges = dashState.maxCharges;
         dashState.nextRechargeAt = 0;
       }
-      cameraOffset += cameraPanDir * CAMERA_PAN_SPEED * simDt;
       ensureTilesForPlayer();
-      cameraX = clamp(player.x - VIEW_W / 2 + cameraOffset, activeTileMinX, activeTileMaxX - VIEW_W);
-      cameraOffset = cameraX - (player.x - VIEW_W / 2);
+      const targetCameraX = player.x - VIEW_W / 2;
+      const targetCameraY = player.y - VIEW_H / 2;
+      const cameraBlend = 1 - Math.pow(1 - CAMERA_FOLLOW_LERP, simDt * 60);
+      cameraX += (targetCameraX - cameraX) * cameraBlend;
+      cameraY += (targetCameraY - cameraY) * cameraBlend;
       while (state.spawnScheduled.length && state.spawnScheduled[0].at <= state.elapsed) {
         state.spawnScheduled.shift().fn();
       }
       if (state.elapsed >= state.nextSpawnAt) advanceSpawnWave();
       if (state.elapsed >= state.nextPickupAt) {
         spawnPickup();
-        state.nextPickupAt = state.elapsed + 5;
+        const lootScale = lootSpawnIntervalScale();
+        state.nextPickupAt = state.elapsed + (PICKUP_SPAWN_INTERVAL + rand(-0.45, 0.85)) * lootScale;
       }
       if (state.elapsed >= state.nextCardAt) {
         spawnCardPickup();
-        state.nextCardAt = state.elapsed + CARD_SPAWN_INTERVAL + rand(-2.2, 4.1);
+        const lootScale = lootSpawnIntervalScale();
+        state.nextCardAt = state.elapsed + (CARD_SPAWN_INTERVAL + rand(-1.6, 3.4)) * lootScale;
       }
       for (let i = entities.hunters.length - 1; i >= 0; i--) {
         if (state.elapsed >= entities.hunters[i].dieAt) entities.hunters.splice(i, 1);
@@ -2074,7 +2221,10 @@
       const wBurstMult = inventory.diamondEmpower === "speedPassive" || state.elapsed < player.burstUntil ? 2 : 1;
       const ultSpeedMult = state.elapsed < player.ultimateSpeedUntil ? 1.75 : 1;
       const terrainMult = state.elapsed < inventory.spadesObstacleBoostUntil ? 1 + passive.obstacleTouchMult : 1;
-      const speedMult = Math.max(wBurstMult, ultSpeedMult) * passive.speedMult * terrainMult;
+      const burstBonus = Math.max(0, Math.max(wBurstMult, ultSpeedMult) - 1);
+      const passiveBonus = Math.max(0, passive.speedMult - 1);
+      const terrainBonus = Math.max(0, terrainMult - 1);
+      const speedMult = 1 + burstBonus + passiveBonus + terrainBonus;
       const effectiveSpeed = player.speed * speedMult * playerSpeedHealthMultiplier();
       const moving = mx !== 0 || my !== 0;
       const phaseThrough = inventory.clubsPhaseThroughTerrain && state.elapsed < player.burstUntil;
@@ -2082,7 +2232,7 @@
         ignoreObstacles: phaseThrough
       });
       if (moving && moveRes.touchedObstacle && passive.obstacleTouchMult > 1) {
-        inventory.spadesObstacleBoostUntil = state.elapsed + 1;
+        inventory.spadesObstacleBoostUntil = state.elapsed + TERRAIN_SPEED_BOOST_LINGER;
       }
       updatePlayerVelocity(dt);
       if (!enemiesFrozen) {
@@ -2147,6 +2297,7 @@
         (() => {
           const type = abilities.random.type;
           const hasAbility = !!type;
+          const displayName = type === "burst" ? "Push" : hasAbility ? type[0].toUpperCase() + type.slice(1) : "None";
           const lockRemaining = type === "burst" ? Math.max(0, state.ultimatePushbackReadyAt - state.elapsed) : 0;
           const locked = lockRemaining > 0;
           const outOfAmmo = hasAbility && abilities.random.ammo <= 0;
@@ -2158,7 +2309,7 @@
           const ready = hasAbility && !locked && !outOfAmmo;
           return {
             key: "R",
-            label: hasAbility ? type[0].toUpperCase() + type.slice(1) : "None",
+            label: displayName,
             color,
             remaining: ready ? 0 : lockRemaining || 1,
             duration: lockRemaining > 0 ? 8 : 1,
@@ -2195,7 +2346,7 @@
         y: (Math.random() * 2 - 1) * state.screenShakeStrength
       } : { x: 0, y: 0 };
       ctx.save();
-      ctx.translate(-cameraX + shake.x, shake.y);
+      ctx.translate(-cameraX + shake.x, -cameraY + shake.y);
       drawObstacles(ctx, obstacles);
       for (const p of entities.pickups) {
         drawHealPickup(ctx, p, state.elapsed);
@@ -2234,14 +2385,36 @@
       for (const zone of entities.dangerZones) {
         const zu = zone.windup != null ? zone.windup : 0.8;
         const life = clamp((state.elapsed - zone.bornAt) / zu, 0, 1);
-        const pulse = 1 + Math.sin(state.elapsed * 20) * 0.08;
-        const radius = zone.r * pulse;
-        drawCircle(ctx, zone.x, zone.y, radius, zone.exploded ? "#f43f5e" : "#ef4444", 0.25 + life * 0.4);
-        ctx.strokeStyle = "#f87171";
-        ctx.lineWidth = 2;
-        ctx.beginPath();
-        ctx.arc(zone.x, zone.y, radius, 0, TAU);
-        ctx.stroke();
+        const lingering = zone.exploded && state.elapsed < (zone.lingerUntil ?? zone.detonateAt);
+        const tSinceDet = state.elapsed - zone.detonateAt;
+        const inBang = zone.exploded && lingering && tSinceDet < SNIPER_ARTILLERY_BANG_DURATION;
+        if (!zone.exploded) {
+          const pulse = 1 + Math.sin(state.elapsed * 20) * 0.08;
+          const radius = zone.r * pulse;
+          drawCircle(ctx, zone.x, zone.y, radius, "#ef4444", 0.25 + life * 0.4);
+          ctx.strokeStyle = "#f87171";
+          ctx.lineWidth = 2;
+          ctx.beginPath();
+          ctx.arc(zone.x, zone.y, radius, 0, TAU);
+          ctx.stroke();
+        } else if (lingering) {
+          const r = zone.r;
+          drawCircle(ctx, zone.x, zone.y, r, "#9f1239", 0.38);
+          ctx.strokeStyle = "rgba(248, 113, 113, 0.95)";
+          ctx.lineWidth = 2.5;
+          ctx.beginPath();
+          ctx.arc(zone.x, zone.y, r, 0, TAU);
+          ctx.stroke();
+          ctx.strokeStyle = "rgba(254, 202, 202, 0.55)";
+          ctx.lineWidth = 1;
+          ctx.beginPath();
+          ctx.arc(zone.x, zone.y, r * 0.72, 0, TAU);
+          ctx.stroke();
+          if (inBang) {
+            const u = clamp(tSinceDet / SNIPER_ARTILLERY_BANG_DURATION, 0, 1);
+            drawArtilleryDetonationBang(ctx, zone, u);
+          }
+        }
       }
       for (const b of entities.bullets) {
         const life = clamp((state.elapsed - b.bornAt) / b.life, 0, 1);
@@ -2575,8 +2748,12 @@
       const key = event.key.toLowerCase();
       if (key.startsWith("arrow")) event.preventDefault();
       if (state.manualPause) {
+        const resumeGameplay = key.startsWith("arrow") || key === "q" || key === "w" || key === "e" || key === "r";
+        if (!resumeGameplay) {
+          if (key === " ") event.preventDefault();
+          return;
+        }
         state.manualPause = false;
-        if (key === " ") return;
       }
       if (state.inventoryModalOpen && (key === "enter" || key === " " || key === "escape")) {
         continueAfterLoadout();
@@ -2585,7 +2762,6 @@
       if (key === " " && !state.pausedForCard && !state.inventoryModalOpen) {
         state.manualPause = true;
         state.keys.clear();
-        cameraPanDir = 0;
         return;
       }
       if (state.waitingForMovementResume) {
@@ -2595,9 +2771,6 @@
         state.pausedForCard = false;
       }
       if (key.startsWith("arrow")) state.keys.add(key);
-      if (key === "a") cameraPanDir = -1;
-      if (key === "d") cameraPanDir = 1;
-      if (key === "s") cameraOffset = 0;
       onAbilityKey(key);
       if (key === "r" && !state.running) resetGame();
     });
@@ -2605,7 +2778,6 @@
       const key = event.key.toLowerCase();
       if (key.startsWith("arrow")) event.preventDefault();
       if (key.startsWith("arrow")) state.keys.delete(key);
-      if (key === "a" || key === "d") cameraPanDir = 0;
     });
     snapshotFolderButton.addEventListener("click", () => {
       chooseSnapshotFolder();

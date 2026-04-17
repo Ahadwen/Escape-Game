@@ -6,7 +6,9 @@ export const HEAL_PICKUP_HIT_R = 24;
 export const HEAL_PICKUP_PLUS_HALF = 13;
 export const HEAL_PICKUP_ARM_THICK = 6;
 export const SNIPER_ARTILLERY_WINDUP = 1.38;
-export const SNIPER_ARTILLERY_LEAD = 0.94;
+export const SNIPER_ARTILLERY_LEAD = 0.82;
+/** Seconds of impact flash / shockwave before the lingering ground hazard is shown. */
+export const SNIPER_ARTILLERY_BANG_DURATION = 0.34;
 
 export function tileGridDims(viewH) {
   return {
