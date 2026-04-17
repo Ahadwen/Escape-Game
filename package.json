@@ -6,9 +6,11 @@
   "scripts": {
     "dev": "vite",
     "build": "vite build",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "bundle:escape": "esbuild src/escape/entry.js --bundle --format=iife --platform=browser --outfile=src/escape/standalone.js"
   },
   "devDependencies": {
+    "esbuild": "^0.28.0",
     "vite": "^8.0.4"
   }
 }
