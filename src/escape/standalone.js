@@ -232,7 +232,22 @@
   }
 
   // src/escape/game.js
-  function mountEscape({ canvas, snapshotFolderButton, snapshotStatus }) {
+  function mountEscape({
+    canvas,
+    snapshotFolderButton,
+    snapshotStatus,
+    abilitySlots,
+    cardSlotEls,
+    backpackSlotEl,
+    setBonusStatusEl,
+    cardModal,
+    cardModalFace,
+    modalSetBonusStatusEl,
+    cardCloseButton,
+    cardPickupButton,
+    cardSkipButton,
+    cardSwapRow
+  }) {
     const ctx = canvas.getContext("2d");
     const world = { w: canvas.width, h: canvas.height };
     const postFxCanvas = document.createElement("canvas");
@@ -243,6 +258,7 @@
     const VIEW_H = world.h;
     const { TILE_COLS, TILE_ROWS } = tileGridDims(world.h);
     const DEATH_ANIM_DURATION = 0.42;
+    const CARD_SPAWN_INTERVAL = 12;
     let obstacles = [];
     let activeTileMinX = 0;
     let activeTileMaxX = VIEW_W;
@@ -296,7 +312,8 @@
       spawnInterval: 8,
       nextSpawnAt: 3,
       spawnScheduled: [],
-      nextPickupAt: 4,
+      nextPickupAt: 3.5,
+      nextCardAt: 10,
       hurtFlash: 0,
       damageEvents: [],
       enemyHitCooldown: 0.52,
@@ -309,7 +326,15 @@
       ultimatePushbackReadyAt: 0,
       screenShakeUntil: 0,
       screenShakeStrength: 0,
-      deathStartedAtMs: 0
+      deathStartedAtMs: 0,
+      manualPause: false,
+      pausedForCard: false,
+      inventoryModalOpen: false,
+      waitingForMovementResume: false,
+      pendingCard: null,
+      setBonusChoicePendingSuit: null,
+      setBonusChoiceCard: null,
+      playerHeadstartUntil: 0
     };
     let snapshotDirectoryHandle = null;
     const abilities = {
@@ -329,8 +354,354 @@
       laserBeams: [],
       attackRings: [],
       damageRipples: [],
-      ultimateEffects: []
+      ultimateEffects: [],
+      cards: [],
+      healPopups: []
     };
+    const inventory = {
+      cards: [],
+      backpackCard: null,
+      diamondEmpower: null,
+      heartsRegenPerSec: 0,
+      spadesUltSlowUntil: 0,
+      spadesObstacleBoostUntil: 0,
+      clubsInvisUntil: 0,
+      clubsPhaseThroughTerrain: false,
+      heartsResistanceReadyAt: 0,
+      heartsResistanceCooldownDuration: 0,
+      heartsRegenBank: 0,
+      dodgeTextUntil: 0
+    };
+    const passive = {
+      cooldownFlat: { dash: 0, burst: 0, decoy: 0 },
+      speedMult: 1,
+      obstacleTouchMult: 1,
+      dodgeChanceWhenDashCd: 0,
+      stunOnHitSecs: 0,
+      invisOnBurst: 0,
+      dashChargesBonus: 0,
+      heartsShieldArc: 0
+    };
+    const dashState = {
+      charges: 1,
+      maxCharges: 1,
+      nextRechargeAt: 0
+    };
+    const suitGlyph = { diamonds: "\u2666", hearts: "\u2665", clubs: "\u2663", spades: "\u2660" };
+    function cardRankText(rank) {
+      if (rank === 1) return "A";
+      if (rank === 11) return "J";
+      if (rank === 12) return "Q";
+      if (rank === 13) return "K";
+      return String(rank);
+    }
+    function formatCardName(card) {
+      return `${cardRankText(card.rank)}${suitGlyph[card.suit] ?? "?"}`;
+    }
+    function randomSuitForDraw() {
+      const counts = { diamonds: 0, hearts: 0, clubs: 0, spades: 0 };
+      for (const card of inventory.cards) counts[card.suit] += 1;
+      const lockedSuit = Object.keys(counts).find((s) => counts[s] >= 2);
+      if (lockedSuit) return lockedSuit;
+      const suits = ["diamonds", "hearts", "clubs", "spades"];
+      return suits[Math.floor(Math.random() * suits.length)];
+    }
+    function makeCardEffect(suit, rank) {
+      if (suit === "diamonds") {
+        const abilityPool = ["dash", "burst", "decoy"];
+        return { kind: "cooldown", target: abilityPool[Math.floor(Math.random() * abilityPool.length)], value: 0.1 * rank };
+      }
+      if (suit === "hearts") {
+        if (rank >= 11) return { kind: "frontShield", arc: 28 + rank * 4 };
+        if (Math.random() < 0.5) return { kind: "maxHp", value: Math.ceil(rank * 0.5) };
+        return { kind: "hitResist", cooldown: Math.max(3, 15 - 0.5 * rank) };
+      }
+      if (suit === "clubs") {
+        const picks = ["dodge", "stun", "invisBurst"];
+        const pick = picks[Math.floor(Math.random() * picks.length)];
+        if (pick === "dodge") return { kind: "dodge", value: (5 + 0.1 * rank) / 100 };
+        if (pick === "stun") return { kind: "stun", value: 0.2 * rank };
+        return { kind: "invisBurst", value: 0.1 * rank };
+      }
+      if (rank >= 11) return { kind: "dashCharge", value: 1 };
+      if (Math.random() < 0.5) return { kind: "speed", value: Math.min(0.25, 0.025 * rank) };
+      return { kind: "terrainBoost", value: Math.min(0.25, 0.025 * rank) };
+    }
+    function makeRandomCard() {
+      const suit = randomSuitForDraw();
+      const rank = Math.floor(rand(1, 14));
+      return {
+        id: `${Date.now()}-${Math.floor(Math.random() * 1e6)}`,
+        suit,
+        rank,
+        effect: makeCardEffect(suit, rank)
+      };
+    }
+    function describeCardEffect(card) {
+      const e = card.effect;
+      if (e.kind === "cooldown") return `-${e.value.toFixed(1)}s ${e.target} cooldown`;
+      if (e.kind === "maxHp") return `+${e.value} max HP`;
+      if (e.kind === "hitResist") return `Block one hit every ${e.cooldown.toFixed(1)}s`;
+      if (e.kind === "frontShield") return `Front shield arc +${Math.round(e.arc)}deg`;
+      if (e.kind === "dodge") return `${Math.round(e.value * 1e3) / 10}% dodge while dash is cooling down`;
+      if (e.kind === "stun") return `Stun nearby enemies ${e.value.toFixed(1)}s on hit`;
+      if (e.kind === "invisBurst") return `Burst grants ${e.value.toFixed(1)}s invisibility`;
+      if (e.kind === "speed") return `+${Math.round(e.value * 100)}% passive speed`;
+      if (e.kind === "terrainBoost") return `+${Math.round(e.value * 100)}% terrain-touch speed boost`;
+      if (e.kind === "dashCharge") return `+${e.value} dash charge`;
+      return "Passive effect";
+    }
+    function renderCardSlots() {
+      if (!cardSlotEls) return;
+      for (let i = 0; i < Math.min(3, cardSlotEls.length); i++) {
+        const slot = cardSlotEls[i];
+        const card = inventory.cards[i];
+        slot.classList.toggle("filled", !!card);
+        if (!card) {
+          slot.innerHTML = "Empty Slot";
+          continue;
+        }
+        slot.innerHTML = `<div><span class="title">${formatCardName(card)}</span><span class="meta">${describeCardEffect(card)}</span></div>`;
+      }
+      if (backpackSlotEl) {
+        backpackSlotEl.classList.toggle("filled", !!inventory.backpackCard);
+        if (!inventory.backpackCard) {
+          backpackSlotEl.innerHTML = "Backpack Empty";
+        } else {
+          backpackSlotEl.innerHTML = `<div><span class="title">Backpack: ${formatCardName(
+            inventory.backpackCard
+          )}</span><span class="meta">${describeCardEffect(inventory.backpackCard)}</span></div>`;
+        }
+      }
+    }
+    function recalcCardPassives() {
+      passive.cooldownFlat = { dash: 0, burst: 0, decoy: 0 };
+      passive.speedMult = 1;
+      passive.obstacleTouchMult = 1;
+      passive.dodgeChanceWhenDashCd = 0;
+      passive.stunOnHitSecs = 0;
+      passive.invisOnBurst = 0;
+      passive.dashChargesBonus = 0;
+      passive.heartsShieldArc = 0;
+      inventory.heartsRegenPerSec = 0;
+      inventory.clubsPhaseThroughTerrain = false;
+      let maxHpBonus = 0;
+      const suits = { diamonds: 0, hearts: 0, clubs: 0, spades: 0 };
+      for (const card of inventory.cards) {
+        suits[card.suit] += 1;
+        const e = card.effect;
+        if (e.kind === "cooldown") passive.cooldownFlat[e.target] += e.value;
+        else if (e.kind === "maxHp") maxHpBonus += e.value;
+        else if (e.kind === "dodge") passive.dodgeChanceWhenDashCd += e.value;
+        else if (e.kind === "stun") passive.stunOnHitSecs += e.value;
+        else if (e.kind === "invisBurst") passive.invisOnBurst += e.value;
+        else if (e.kind === "speed") passive.speedMult += e.value;
+        else if (e.kind === "terrainBoost") passive.obstacleTouchMult += e.value;
+        else if (e.kind === "dashCharge") passive.dashChargesBonus += e.value;
+        else if (e.kind === "frontShield") passive.heartsShieldArc += e.arc;
+      }
+      if (suits.hearts >= 3) inventory.heartsRegenPerSec = 0.3;
+      if (suits.clubs >= 3) inventory.clubsPhaseThroughTerrain = true;
+      if (suits.spades >= 3) {
+      }
+      if (suits.diamonds >= 3 && !inventory.diamondEmpower && !state.setBonusChoicePendingSuit) {
+        state.setBonusChoicePendingSuit = "diamonds";
+      }
+      dashState.maxCharges = 1 + passive.dashChargesBonus;
+      dashState.charges = Math.min(dashState.charges || dashState.maxCharges, dashState.maxCharges);
+      player.maxHp = Math.max(1, 10 + maxHpBonus);
+      player.hp = Math.min(player.hp, player.maxHp);
+      renderCardSlots();
+      updateSetBonusStatus();
+    }
+    function updateSetBonusStatus() {
+      const lines = getSetBonusLines();
+      if (setBonusStatusEl) setBonusStatusEl.textContent = lines.join(" ");
+    }
+    function getSetBonusLines() {
+      const suits = { diamonds: 0, hearts: 0, clubs: 0, spades: 0 };
+      for (const card of inventory.cards) suits[card.suit] += 1;
+      const lines = [];
+      if (suits.diamonds >= 3) {
+        const pick = inventory.diamondEmpower === "dash2x" ? "dash goes twice as far" : inventory.diamondEmpower === "speedPassive" ? "speed burst is passive" : inventory.diamondEmpower === "decoyLead" ? "decoy drifts away, cooldown -2s, duration +1s" : "choose your empowerment in inventory";
+        lines.push(`Set bonus! Diamonds: ${pick}.`);
+      }
+      if (suits.hearts >= 3) lines.push("Set bonus! Hearts: passive HP regeneration.");
+      if (suits.clubs >= 3) lines.push("Set bonus! Clubs: burst phase-through terrain.");
+      if (suits.spades >= 3) lines.push("Set bonus! Spades: ult slows the world for 3s.");
+      return lines;
+    }
+    function renderCardModal() {
+      if (!cardModal || !cardModalFace || !cardSwapRow) return;
+      if (!state.inventoryModalOpen) {
+        cardModal.classList.remove("open");
+        if (modalSetBonusStatusEl) modalSetBonusStatusEl.textContent = "";
+        return;
+      }
+      cardModal.classList.add("open");
+      if (state.pendingCard) {
+        const card = state.pendingCard;
+        cardModalFace.classList.remove("compact");
+        cardModalFace.innerHTML = `<div class="big">${formatCardName(card)}</div><div class="desc">${describeCardEffect(card)}</div>`;
+      } else {
+        cardModalFace.classList.add("compact");
+        cardModalFace.innerHTML = '<div class="desc">Drag cards between Slot 1-3 and Backpack. Press X or Leave when done.</div>';
+      }
+      cardSwapRow.innerHTML = "";
+      const zones = [
+        { id: "pickup", label: "Pickup", card: state.pendingCard },
+        { id: "slot0", label: "Slot 1", card: inventory.cards[0] || null },
+        { id: "slot1", label: "Slot 2", card: inventory.cards[1] || null },
+        { id: "slot2", label: "Slot 3", card: inventory.cards[2] || null },
+        { id: "backpack", label: "Backpack", card: inventory.backpackCard || null }
+      ];
+      for (const zone of zones) {
+        const zoneEl = document.createElement("div");
+        zoneEl.className = "drop-zone";
+        zoneEl.dataset.zoneId = zone.id;
+        zoneEl.innerHTML = `<div class="zone-label">${zone.label}</div>`;
+        zoneEl.addEventListener("dragover", (event) => {
+          event.preventDefault();
+          zoneEl.classList.add("over");
+        });
+        zoneEl.addEventListener("dragleave", () => zoneEl.classList.remove("over"));
+        zoneEl.addEventListener("drop", (event) => {
+          event.preventDefault();
+          zoneEl.classList.remove("over");
+          const from = event.dataTransfer?.getData("text/plain");
+          if (!from) return;
+          swapCardsBetweenZones(from, zone.id);
+        });
+        if (zone.card) {
+          const cardEl = document.createElement("div");
+          cardEl.className = "zone-card";
+          cardEl.draggable = true;
+          cardEl.textContent = `${formatCardName(zone.card)} - ${describeCardEffect(zone.card)}`;
+          cardEl.addEventListener("dragstart", (event) => {
+            event.dataTransfer?.setData("text/plain", zone.id);
+          });
+          zoneEl.appendChild(cardEl);
+        } else {
+          const emptyEl = document.createElement("div");
+          emptyEl.className = "zone-empty";
+          emptyEl.textContent = "Empty";
+          zoneEl.appendChild(emptyEl);
+        }
+        cardSwapRow.appendChild(zoneEl);
+      }
+      if (state.setBonusChoicePendingSuit === "diamonds" && !inventory.diamondEmpower) {
+        const mk = (id, text) => {
+          const btn = document.createElement("button");
+          btn.type = "button";
+          btn.className = "leave-button";
+          btn.textContent = `Set bonus! ${text}`;
+          btn.addEventListener("click", () => {
+            inventory.diamondEmpower = id;
+            state.setBonusChoicePendingSuit = null;
+            updateSetBonusStatus();
+            renderCardModal();
+          });
+          return btn;
+        };
+        cardSwapRow.appendChild(mk("dash2x", "Dash goes twice as far"));
+        cardSwapRow.appendChild(mk("speedPassive", "Speed burst is passive"));
+        cardSwapRow.appendChild(mk("decoyLead", "Decoy drifts away, -2s cooldown, +1s duration"));
+      }
+      const leaveBtn = document.createElement("button");
+      leaveBtn.type = "button";
+      leaveBtn.className = "leave-button";
+      leaveBtn.textContent = "Leave";
+      leaveBtn.addEventListener("click", () => continueAfterLoadout());
+      cardSwapRow.appendChild(leaveBtn);
+      if (modalSetBonusStatusEl) {
+        const lines = getSetBonusLines();
+        modalSetBonusStatusEl.textContent = lines.length ? lines.join(" ") : "";
+      }
+    }
+    function getCardByZone(zoneId) {
+      if (zoneId === "pickup") return state.pendingCard;
+      if (zoneId === "backpack") return inventory.backpackCard;
+      if (zoneId.startsWith("slot")) {
+        const idx = Number(zoneId.slice(4));
+        if (Number.isInteger(idx) && idx >= 0 && idx < 3) return inventory.cards[idx] || null;
+      }
+      return null;
+    }
+    function setCardByZone(zoneId, card) {
+      if (zoneId === "pickup") state.pendingCard = card;
+      else if (zoneId === "backpack") inventory.backpackCard = card;
+      else if (zoneId.startsWith("slot")) {
+        const idx = Number(zoneId.slice(4));
+        if (Number.isInteger(idx) && idx >= 0 && idx < 3) inventory.cards[idx] = card;
+      }
+    }
+    function swapCardsBetweenZones(fromZoneId, toZoneId) {
+      if (!fromZoneId || !toZoneId || fromZoneId === toZoneId) return;
+      const fromCard = getCardByZone(fromZoneId);
+      if (!fromCard) return;
+      const toCard = getCardByZone(toZoneId);
+      setCardByZone(fromZoneId, toCard || null);
+      setCardByZone(toZoneId, fromCard);
+      recalcCardPassives();
+      renderCardModal();
+    }
+    function closeCardModal() {
+      state.inventoryModalOpen = false;
+      state.pendingCard = null;
+      state.pausedForCard = true;
+      state.waitingForMovementResume = true;
+      state.playerHeadstartUntil = state.elapsed + 0.3;
+      renderCardModal();
+    }
+    function continueAfterLoadout() {
+      state.pendingCard = null;
+      closeCardModal();
+    }
+    function pickPendingCard(swapIdx = -1) {
+      if (!state.pendingCard) return;
+      if (inventory.cards.length < 3) inventory.cards.push(state.pendingCard);
+      else if (swapIdx >= 0 && swapIdx < inventory.cards.length) inventory.cards[swapIdx] = state.pendingCard;
+      closeCardModal();
+      recalcCardPassives();
+    }
+    function putPendingInActiveSlot(slotIdx) {
+      if (!state.pendingCard) return;
+      if (slotIdx < 0 || slotIdx >= 3) return;
+      const prev = inventory.cards[slotIdx] || null;
+      inventory.cards[slotIdx] = state.pendingCard;
+      state.pendingCard = prev;
+      recalcCardPassives();
+      renderCardModal();
+    }
+    function putPendingInBackpack() {
+      if (!state.pendingCard) return;
+      const prev = inventory.backpackCard;
+      inventory.backpackCard = state.pendingCard;
+      state.pendingCard = prev;
+      renderCardSlots();
+      updateSetBonusStatus();
+      renderCardModal();
+    }
+    function moveBackpackToSlot(slotIdx) {
+      if (!inventory.backpackCard) return;
+      if (slotIdx < 0 || slotIdx >= 3) return;
+      const prev = inventory.cards[slotIdx] || null;
+      inventory.cards[slotIdx] = inventory.backpackCard;
+      inventory.backpackCard = prev;
+      recalcCardPassives();
+      renderCardModal();
+    }
+    function moveSlotToBackpack(slotIdx) {
+      if (slotIdx < 0 || slotIdx >= 3) return;
+      if (!inventory.cards[slotIdx]) return;
+      const prev = inventory.backpackCard;
+      inventory.backpackCard = inventory.cards[slotIdx];
+      inventory.cards[slotIdx] = prev;
+      recalcCardPassives();
+      renderCardModal();
+    }
+    function showSetBonusChoice() {
+    }
     function outOfBoundsCircle(c) {
       return c.y - c.r < 0 || c.y + c.r > world.h;
     }
@@ -389,11 +760,18 @@
       }
       return false;
     }
-    function moveCircleWithCollisions(entity, vx, vy, dt) {
+    function moveCircleWithCollisions(entity, vx, vy, dt, opts = {}) {
+      const ignoreObstacles = !!opts.ignoreObstacles;
+      let touchedObstacle = false;
       const nx = { x: entity.x + vx * dt, y: entity.y, r: entity.r };
-      if (!outOfBoundsCircle(nx) && !collidesAnyObstacle(nx)) entity.x = nx.x;
+      const nxBlocked = outOfBoundsCircle(nx) || !ignoreObstacles && collidesAnyObstacle(nx);
+      if (!nxBlocked) entity.x = nx.x;
+      else if (!ignoreObstacles) touchedObstacle = true;
       const ny = { x: entity.x, y: entity.y + vy * dt, r: entity.r };
-      if (!outOfBoundsCircle(ny) && !collidesAnyObstacle(ny)) entity.y = ny.y;
+      const nyBlocked = outOfBoundsCircle(ny) || !ignoreObstacles && collidesAnyObstacle(ny);
+      if (!nyBlocked) entity.y = ny.y;
+      else if (!ignoreObstacles) touchedObstacle = true;
+      return { touchedObstacle };
     }
     function updatePlayerVelocity(dt) {
       const pdt = Math.max(dt, 1e-5);
@@ -437,7 +815,8 @@
       state.spawnInterval = 8;
       state.nextSpawnAt = 3;
       state.spawnScheduled = [];
-      state.nextPickupAt = 4;
+      state.nextPickupAt = 3.5;
+      state.nextCardAt = 10;
       state.hurtFlash = 0;
       state.damageEvents = [];
       state.snapshotPending = false;
@@ -449,6 +828,13 @@
       state.screenShakeUntil = 0;
       state.screenShakeStrength = 0;
       state.deathStartedAtMs = 0;
+      state.manualPause = false;
+      state.pausedForCard = false;
+      state.inventoryModalOpen = false;
+      state.waitingForMovementResume = false;
+      state.pendingCard = null;
+      state.setBonusChoicePendingSuit = null;
+      state.playerHeadstartUntil = 0;
       player.x = 96;
       player.y = 340;
       cameraOffset = 0;
@@ -458,6 +844,7 @@
       activeTileMaxX = VIEW_W;
       activePlayerTile = 0;
       lastTileIndex = null;
+      player.maxHp = 10;
       player.hp = player.maxHp;
       player.facing = { x: 1, y: 0 };
       player.burstUntil = 0;
@@ -483,8 +870,36 @@
       entities.attackRings = [];
       entities.damageRipples = [];
       entities.ultimateEffects = [];
+      entities.cards = [];
+      entities.healPopups = [];
+      inventory.cards = [];
+      inventory.backpackCard = null;
+      inventory.diamondEmpower = null;
+      inventory.heartsRegenPerSec = 0;
+      inventory.spadesUltSlowUntil = 0;
+      inventory.spadesObstacleBoostUntil = 0;
+      inventory.clubsInvisUntil = 0;
+      inventory.clubsPhaseThroughTerrain = false;
+      inventory.heartsResistanceReadyAt = 0;
+      inventory.heartsResistanceCooldownDuration = 0;
+      inventory.heartsRegenBank = 0;
+      inventory.dodgeTextUntil = 0;
+      passive.cooldownFlat = { dash: 0, burst: 0, decoy: 0 };
+      passive.speedMult = 1;
+      passive.obstacleTouchMult = 1;
+      passive.dodgeChanceWhenDashCd = 0;
+      passive.stunOnHitSecs = 0;
+      passive.invisOnBurst = 0;
+      passive.dashChargesBonus = 0;
+      passive.heartsShieldArc = 0;
+      dashState.maxCharges = 1;
+      dashState.charges = 1;
+      dashState.nextRechargeAt = 0;
       ensureTilesForPlayer();
       cameraX = clamp(player.x - VIEW_W / 2 + cameraOffset, activeTileMinX, activeTileMaxX - VIEW_W);
+      renderCardSlots();
+      updateSetBonusStatus();
+      renderCardModal();
     }
     function playerMissingHealth01() {
       if (player.maxHp <= 0) return 0;
@@ -852,7 +1267,7 @@
     }
     function advanceSpawnWave() {
       state.wave += 1;
-      state.spawnInterval = Math.max(2.5, state.spawnInterval * 0.88);
+      state.spawnInterval = Math.max(2.5, state.spawnInterval * 0.93);
       state.nextSpawnAt = state.elapsed + state.spawnInterval;
       scheduleWaveSpawns();
     }
@@ -866,19 +1281,85 @@
         plusThick: HEAL_PICKUP_ARM_THICK,
         expiresAt: state.elapsed + 6,
         life: 6,
-        heal: 2
+        heal: 3
       });
+    }
+    function spawnCardPickup() {
+      const point = randomOpenPoint(16);
+      entities.cards.push({
+        x: point.x,
+        y: point.y,
+        r: 16,
+        card: makeRandomCard(),
+        bornAt: state.elapsed,
+        expiresAt: state.elapsed + 12
+      });
+    }
+    function spawnHealPopup(x, y, text = "+1", color = "#86efac") {
+      entities.healPopups.push({
+        x,
+        y,
+        text,
+        bornAt: state.elapsed,
+        expiresAt: state.elapsed + 0.6
+      });
+    }
+    function getHeartsResistanceCardCount() {
+      let n = 0;
+      for (const card of inventory.cards) {
+        if (card?.effect?.kind === "hitResist") n++;
+      }
+      return n;
+    }
+    function getHeartsResistanceCooldown() {
+      let totalReduction = 0;
+      for (const card of inventory.cards) {
+        const e = card?.effect;
+        if (e?.kind !== "hitResist") continue;
+        totalReduction += Math.max(0, 15 - e.cooldown);
+      }
+      return Math.max(1.5, 15 - totalReduction);
+    }
+    function openCardPickupModal(card) {
+      state.pausedForCard = true;
+      state.inventoryModalOpen = true;
+      state.waitingForMovementResume = false;
+      state.pendingCard = card;
+      state.keys.clear();
+      cameraPanDir = 0;
+      renderCardModal();
+    }
+    function updateCardPickups() {
+      for (let i = entities.cards.length - 1; i >= 0; i--) {
+        const c = entities.cards[i];
+        if (state.elapsed >= c.expiresAt) {
+          entities.cards.splice(i, 1);
+          continue;
+        }
+        const rr = c.r + player.r;
+        if (distSq(c, player) <= rr * rr) {
+          openCardPickupModal(c.card);
+          entities.cards.splice(i, 1);
+          break;
+        }
+      }
     }
     function tryDash() {
       const ability = abilities.dash;
-      if (state.elapsed < ability.nextReadyAt || !state.running) return;
-      ability.nextReadyAt = state.elapsed + ability.cooldown;
+      if (!state.running) return;
+      if (dashState.charges <= 0) return;
+      dashState.charges -= 1;
+      if (dashState.charges < dashState.maxCharges) {
+        const cd = Math.max(0.25, ability.cooldown - passive.cooldownFlat.dash);
+        dashState.nextRechargeAt = Math.max(dashState.nextRechargeAt, state.elapsed + cd);
+      }
       const dir = player.facing;
       const step = 12;
+      const dashRange = inventory.diamondEmpower === "dash2x" ? 240 : 120;
       let tx = player.x;
       let ty = player.y;
       let progressed = false;
-      for (let d = step; d <= 120; d += step) {
+      for (let d = step; d <= dashRange; d += step) {
         const test = { x: player.x + dir.x * d, y: player.y + dir.y * d, r: player.r };
         if (outOfBoundsCircle(test)) break;
         if (collidesAnyObstacle(test)) continue;
@@ -894,20 +1375,24 @@
     function tryBurst() {
       const ability = abilities.burst;
       if (state.elapsed < ability.nextReadyAt || !state.running) return;
-      ability.nextReadyAt = state.elapsed + ability.cooldown;
+      const burstCd = Math.max(0.4, ability.cooldown - passive.cooldownFlat.burst);
+      ability.nextReadyAt = state.elapsed + burstCd;
       player.burstUntil = state.elapsed + ability.duration;
+      if (passive.invisOnBurst > 0) inventory.clubsInvisUntil = Math.max(inventory.clubsInvisUntil, state.elapsed + passive.invisOnBurst);
     }
     function tryDecoy() {
       const ability = abilities.decoy;
       if (state.elapsed < ability.nextReadyAt || !state.running) return;
-      ability.nextReadyAt = state.elapsed + ability.cooldown;
+      const decoyEmpower = inventory.diamondEmpower === "decoyLead";
+      const decoyCd = Math.max(0.4, ability.cooldown - passive.cooldownFlat.decoy - (decoyEmpower ? 2 : 0));
+      ability.nextReadyAt = state.elapsed + decoyCd;
       entities.decoys.push({
         x: player.x,
         y: player.y,
         r: player.r,
         hp: 3,
         invulnerableUntil: state.elapsed + 0.4,
-        expiresAt: state.elapsed + 6
+        expiresAt: state.elapsed + 6 + (decoyEmpower ? 1 : 0)
       });
     }
     function grantRandomAbility() {
@@ -959,6 +1444,11 @@
             entities.projectiles.splice(i, 1);
           }
         }
+        const spadesCount = inventory.cards.filter((c) => c.suit === "spades").length;
+        if (spadesCount >= 3) {
+          const delay = state.playerTimelockUntil > state.elapsed ? state.playerTimelockUntil - state.elapsed : 0;
+          inventory.spadesUltSlowUntil = Math.max(inventory.spadesUltSlowUntil, state.elapsed + delay + 3);
+        }
         state.ultimatePushbackReadyAt = state.elapsed + 8;
       } else if (ability.type === "timelock") {
         state.playerTimelockUntil = Math.max(state.playerTimelockUntil, state.elapsed + 2);
@@ -990,6 +1480,9 @@
     }
     function pickTargetForHunter(hunter) {
       let target = player;
+      if (state.elapsed < inventory.clubsInvisUntil) {
+        return nearestDecoy(hunter) || { x: hunter.x + hunter.dir.x * 40, y: hunter.y + hunter.dir.y * 40 };
+      }
       if (!entities.decoys.length) return target;
       if (hunter.type === "chaser" || hunter.type === "fast") {
         return nearestDecoy(hunter) || target;
@@ -1034,9 +1527,10 @@
     function moveHunters(dt) {
       for (const h of entities.hunters) {
         if (h.type === "spawner") continue;
+        if (state.elapsed < (h.stunnedUntil || 0)) continue;
         const lifeSpan = h.life || Math.max(1e-4, h.dieAt - h.bornAt);
         const age = clamp((state.elapsed - h.bornAt) / lifeSpan, 0, 1);
-        const speedFactor = 1 + age * 1.2;
+        const speedFactor = 1 + age * 0.9;
         const baseSpeed = h.type === "sniper" ? 100 : h.type === "cutter" ? 116 : h.type === "laser" ? 138 : h.type === "ranged" ? 85 : h.type === "fast" ? 150 : 110;
         const speed = baseSpeed * speedFactor;
         let desired;
@@ -1259,6 +1753,18 @@
       if (!state.running) return;
       if (state.elapsed < state.playerInvulnerableUntil) return;
       if (amount <= 0) return;
+      if (state.elapsed < inventory.clubsInvisUntil) return;
+      if (cdr(abilities.dash) > 0 && Math.random() < passive.dodgeChanceWhenDashCd) {
+        inventory.dodgeTextUntil = state.elapsed + 0.8;
+        return;
+      }
+      const heartsResistanceCount = getHeartsResistanceCardCount();
+      if (heartsResistanceCount > 0 && state.elapsed >= inventory.heartsResistanceReadyAt) {
+        const cd = getHeartsResistanceCooldown();
+        inventory.heartsResistanceCooldownDuration = cd;
+        inventory.heartsResistanceReadyAt = state.elapsed + cd;
+        return;
+      }
       let rem = amount;
       if (state.tempHp > 0) {
         const absorbed = Math.min(rem, state.tempHp);
@@ -1278,6 +1784,11 @@
         expiresAt: state.elapsed + 0.22
       });
       state.damageEvents.push({ t: state.elapsed, amount, hpAfter: player.hp });
+      if (passive.stunOnHitSecs > 0) {
+        for (const h of entities.hunters) {
+          if (distSq(h, player) <= 220 * 220) h.stunnedUntil = Math.max(h.stunnedUntil || 0, state.elapsed + passive.stunOnHitSecs);
+        }
+      }
       if (player.hp <= 0) {
         state.deathCount += 1;
         state.snapshotPending = true;
@@ -1373,9 +1884,19 @@
       }
     }
     function cdr(ability) {
+      if (ability === abilities.dash) {
+        if (dashState.charges >= dashState.maxCharges) return 0;
+        return Math.max(0, dashState.nextRechargeAt - state.elapsed);
+      }
       return Math.max(0, ability.nextReadyAt - state.elapsed);
     }
     function updateSpecialAbilityEffects(dt) {
+      if (inventory.diamondEmpower === "decoyLead") {
+        for (const d of entities.decoys) {
+          const away = vectorToTarget(player, d);
+          moveCircleWithCollisions(d, away.x * 110, away.y * 110, dt);
+        }
+      }
       for (const shield of entities.shields) {
         shield.angle += dt * 3.8;
         shield.x = player.x + Math.cos(shield.angle) * shield.radius;
@@ -1422,6 +1943,45 @@
           }
         }
       }
+      if (passive.heartsShieldArc > 0) {
+        const facingAngle = Math.atan2(player.facing.y, player.facing.x);
+        const halfArc = passive.heartsShieldArc * Math.PI / 360;
+        const shieldR = player.r + 30;
+        for (const h of entities.hunters) {
+          if (h.type === "spawner") continue;
+          const dx = h.x - player.x;
+          const dy = h.y - player.y;
+          const d = Math.hypot(dx, dy) || 1;
+          if (d > shieldR + h.r) continue;
+          const ang = Math.atan2(dy, dx);
+          let delta = ang - facingAngle;
+          while (delta > Math.PI) delta -= TAU;
+          while (delta < -Math.PI) delta += TAU;
+          if (Math.abs(delta) > halfArc) continue;
+          const away = vectorToTarget(player, h);
+          const test = { x: h.x + away.x * 34, y: h.y + away.y * 34, r: h.r };
+          if (!outOfBoundsCircle(test) && !collidesAnyObstacle(test)) {
+            h.x = test.x;
+            h.y = test.y;
+          }
+          h.dir.x = away.x;
+          h.dir.y = away.y;
+        }
+        for (let i = entities.projectiles.length - 1; i >= 0; i--) {
+          const p = entities.projectiles[i];
+          const dx = p.x - player.x;
+          const dy = p.y - player.y;
+          const d = Math.hypot(dx, dy) || 1;
+          if (d > shieldR + p.r) continue;
+          const ang = Math.atan2(dy, dx);
+          let delta = ang - facingAngle;
+          while (delta > Math.PI) delta -= TAU;
+          while (delta < -Math.PI) delta += TAU;
+          if (Math.abs(delta) > halfArc) continue;
+          entities.projectiles.splice(i, 1);
+          spawnAttackRing(player.x + dx * 0.65, player.y + dy * 0.65, 12, "#fda4af", 0.12);
+        }
+      }
     }
     function updateLaserHazards() {
       for (const beam of entities.laserBeams) {
@@ -1434,12 +1994,30 @@
     }
     function update(dt) {
       if (!state.running) return;
-      state.elapsed += dt;
-      state.hurtFlash = Math.max(0, state.hurtFlash - dt);
-      state.screenShakeStrength = Math.max(0, state.screenShakeStrength - dt * 30);
+      if (state.manualPause) return;
+      if (state.pausedForCard) return;
+      const worldSlow = state.elapsed < inventory.spadesUltSlowUntil ? 0.35 : 1;
+      const simDt = dt * worldSlow;
+      state.elapsed += simDt;
+      const enemiesFrozen = state.elapsed < state.playerHeadstartUntil;
+      state.hurtFlash = Math.max(0, state.hurtFlash - simDt);
+      state.screenShakeStrength = Math.max(0, state.screenShakeStrength - simDt * 30);
       if (state.elapsed >= state.playerTimelockUntil) state.playerTimelockUntil = 0;
       if (state.tempHp > 0 && state.tempHpExpiry > 0 && state.elapsed >= state.tempHpExpiry) clearTempHp();
-      cameraOffset += cameraPanDir * CAMERA_PAN_SPEED * dt;
+      if (inventory.heartsRegenPerSec > 0 && player.hp > 0) {
+        inventory.heartsRegenBank += inventory.heartsRegenPerSec * simDt;
+        while (inventory.heartsRegenBank >= 1 && player.hp < player.maxHp) {
+          inventory.heartsRegenBank -= 1;
+          player.hp = Math.min(player.maxHp, player.hp + 1);
+          spawnHealPopup(player.x, player.y - player.r - 8, "+1", "#86efac");
+        }
+        if (player.hp >= player.maxHp) inventory.heartsRegenBank = 0;
+      }
+      if (dashState.charges < dashState.maxCharges && state.elapsed >= dashState.nextRechargeAt) {
+        dashState.charges = dashState.maxCharges;
+        dashState.nextRechargeAt = 0;
+      }
+      cameraOffset += cameraPanDir * CAMERA_PAN_SPEED * simDt;
       ensureTilesForPlayer();
       cameraX = clamp(player.x - VIEW_W / 2 + cameraOffset, activeTileMinX, activeTileMaxX - VIEW_W);
       cameraOffset = cameraX - (player.x - VIEW_W / 2);
@@ -1449,7 +2027,11 @@
       if (state.elapsed >= state.nextSpawnAt) advanceSpawnWave();
       if (state.elapsed >= state.nextPickupAt) {
         spawnPickup();
-        state.nextPickupAt = state.elapsed + 6;
+        state.nextPickupAt = state.elapsed + 5;
+      }
+      if (state.elapsed >= state.nextCardAt) {
+        spawnCardPickup();
+        state.nextCardAt = state.elapsed + CARD_SPAWN_INTERVAL + rand(-2.2, 4.1);
       }
       for (let i = entities.hunters.length - 1; i >= 0; i--) {
         if (state.elapsed >= entities.hunters[i].dieAt) entities.hunters.splice(i, 1);
@@ -1469,6 +2051,9 @@
       for (let i = entities.laserBeams.length - 1; i >= 0; i--) {
         if (state.elapsed >= entities.laserBeams[i].expiresAt) entities.laserBeams.splice(i, 1);
       }
+      for (let i = entities.healPopups.length - 1; i >= 0; i--) {
+        if (state.elapsed >= entities.healPopups[i].expiresAt) entities.healPopups.splice(i, 1);
+      }
       let mx = 0;
       let my = 0;
       if (state.keys.has("arrowleft")) mx -= 1;
@@ -1486,19 +2071,33 @@
         mx = 0;
         my = 0;
       }
-      const wBurstMult = state.elapsed < player.burstUntil ? 2 : 1;
+      const wBurstMult = inventory.diamondEmpower === "speedPassive" || state.elapsed < player.burstUntil ? 2 : 1;
       const ultSpeedMult = state.elapsed < player.ultimateSpeedUntil ? 1.75 : 1;
-      const speedMult = Math.max(wBurstMult, ultSpeedMult);
+      const terrainMult = state.elapsed < inventory.spadesObstacleBoostUntil ? 1 + passive.obstacleTouchMult : 1;
+      const speedMult = Math.max(wBurstMult, ultSpeedMult) * passive.speedMult * terrainMult;
       const effectiveSpeed = player.speed * speedMult * playerSpeedHealthMultiplier();
-      moveCircleWithCollisions(player, mx * effectiveSpeed, my * effectiveSpeed, dt);
+      const moving = mx !== 0 || my !== 0;
+      const phaseThrough = inventory.clubsPhaseThroughTerrain && state.elapsed < player.burstUntil;
+      const moveRes = moveCircleWithCollisions(player, mx * effectiveSpeed, my * effectiveSpeed, dt, {
+        ignoreObstacles: phaseThrough
+      });
+      if (moving && moveRes.touchedObstacle && passive.obstacleTouchMult > 1) {
+        inventory.spadesObstacleBoostUntil = state.elapsed + 1;
+      }
       updatePlayerVelocity(dt);
-      moveHunters(dt);
-      updateSnipers(dt);
-      updateRangedAttackers(dt);
-      updateSpawners(dt);
-      updateSpecialAbilityEffects(dt);
-      updateLaserHazards();
-      updateCollisions();
+      if (!enemiesFrozen) {
+        moveHunters(simDt);
+        updateSnipers(simDt);
+        updateRangedAttackers(simDt);
+        updateSpawners(simDt);
+      }
+      updateSpecialAbilityEffects(simDt);
+      if (!enemiesFrozen) {
+        updateLaserHazards();
+        updateCollisions();
+      }
+      updateCardPickups();
+      if (state.setBonusChoicePendingSuit && state.inventoryModalOpen) showSetBonusChoice();
     }
     function drawHud() {
       ctx.textAlign = "left";
@@ -1510,36 +2109,39 @@
       ctx.fillText("Wave: " + state.wave, 14, 52);
       ctx.fillText("Hunters: " + entities.hunters.length, 14, 72);
     }
-    function drawAbilityButtons() {
-      const buttonW = 114;
-      const buttonH = 58;
-      const gap = 12;
-      const totalW = buttonW * 4 + gap * 3;
-      const startX = (world.w - totalW) / 2;
-      const y = world.h - buttonH - 14;
+    function updateAbilityButtons() {
+      if (!abilitySlots) return;
+      const dashReduction = Math.max(0, passive.cooldownFlat.dash);
+      const burstReduction = Math.max(0, passive.cooldownFlat.burst);
+      const decoyReduction = Math.max(0, passive.cooldownFlat.decoy + (inventory.diamondEmpower === "decoyLead" ? 2 : 0));
+      const cdrSuffix = (base, reduction) => {
+        if (!(reduction > 1e-3) || !(base > 1e-3)) return "";
+        const pct = Math.round(reduction / base * 100);
+        return ` -${reduction.toFixed(1)}s -${pct}%`;
+      };
       const abilitiesUi = [
         {
           key: "Q",
-          label: "Dash",
+          label: "Dash" + cdrSuffix(abilities.dash.cooldown, dashReduction),
           color: "#38bdf8",
           remaining: cdr(abilities.dash),
-          duration: abilities.dash.cooldown,
-          extra: ""
+          duration: Math.max(0.25, abilities.dash.cooldown - dashReduction),
+          extra: `${dashState.charges}/${dashState.maxCharges}`
         },
         {
           key: "W",
-          label: "Burst",
+          label: "Burst" + cdrSuffix(abilities.burst.cooldown, burstReduction),
           color: "#22d3ee",
           remaining: cdr(abilities.burst),
-          duration: abilities.burst.cooldown,
+          duration: Math.max(0.4, abilities.burst.cooldown - burstReduction),
           extra: ""
         },
         {
           key: "E",
-          label: "Decoy",
+          label: "Decoy" + cdrSuffix(abilities.decoy.cooldown, decoyReduction),
           color: "#a78bfa",
           remaining: cdr(abilities.decoy),
-          duration: abilities.decoy.cooldown,
+          duration: Math.max(0.4, abilities.decoy.cooldown - decoyReduction),
           extra: ""
         },
         (() => {
@@ -1566,31 +2168,21 @@
       ];
       for (let i = 0; i < abilitiesUi.length; i++) {
         const info = abilitiesUi[i];
-        const x = startX + i * (buttonW + gap);
+        const slot = abilitySlots[i];
+        if (!slot) continue;
+        const fill = slot.querySelector(".ability-fill");
+        const keyEl = slot.querySelector(".ability-key");
+        const labelEl = slot.querySelector(".ability-label");
+        const valueEl = slot.querySelector(".ability-value");
+        if (!fill || !keyEl || !labelEl || !valueEl) continue;
         const cooldownProgress = clamp(1 - info.remaining / Math.max(1e-3, info.duration), 0, 1);
-        ctx.fillStyle = "rgba(2, 6, 23, 0.62)";
-        ctx.fillRect(x, y, buttonW, buttonH);
-        ctx.strokeStyle = "rgba(148, 163, 184, 0.55)";
-        ctx.lineWidth = 1.5;
-        ctx.strokeRect(x + 0.5, y + 0.5, buttonW - 1, buttonH - 1);
-        ctx.fillStyle = info.color;
-        ctx.globalAlpha = 0.2 + cooldownProgress * 0.75;
-        ctx.fillRect(x, y, buttonW * cooldownProgress, buttonH);
-        ctx.globalAlpha = 1;
-        if (cooldownProgress < 1) {
-          ctx.fillStyle = `rgba(15, 23, 42, ${0.78 - cooldownProgress * 0.5})`;
-          ctx.fillRect(x + buttonW * cooldownProgress, y, buttonW * (1 - cooldownProgress), buttonH);
-        }
-        ctx.fillStyle = "#f8fafc";
-        ctx.textAlign = "left";
-        ctx.textBaseline = "top";
-        ctx.font = "bold 14px Arial";
-        ctx.fillText(info.key, x + 8, y + 7);
-        ctx.font = "12px Arial";
-        ctx.fillText(info.label, x + 8, y + 26);
-        ctx.textAlign = "right";
+        fill.style.width = `${Math.round(cooldownProgress * 100)}%`;
+        fill.style.background = info.color;
+        fill.style.opacity = String(0.2 + cooldownProgress * 0.75);
+        keyEl.textContent = info.key;
+        labelEl.textContent = info.label;
         const cooldownText = info.remaining > 0.01 ? info.remaining.toFixed(1) + "s" : info.extra || "READY";
-        ctx.fillText(cooldownText, x + buttonW - 8, y + 26);
+        valueEl.textContent = cooldownText;
       }
     }
     function render(tsMs) {
@@ -1616,6 +2208,27 @@
         ctx.fillRect(bx, by, barW, barH);
         ctx.fillStyle = lifeLeft > 0.35 ? "#22c55e" : "#ef4444";
         ctx.fillRect(bx, by, barW * lifeLeft, barH);
+      }
+      for (const c of entities.cards) {
+        const bob = Math.sin((state.elapsed - c.bornAt) * 5) * 2;
+        const w = 20;
+        const h = 28;
+        ctx.save();
+        ctx.translate(c.x, c.y + bob);
+        ctx.fillStyle = "#1d4ed8";
+        ctx.fillRect(-w / 2, -h / 2, w, h);
+        ctx.strokeStyle = "#bfdbfe";
+        ctx.lineWidth = 2;
+        ctx.strokeRect(-w / 2, -h / 2, w, h);
+        ctx.strokeStyle = "rgba(191,219,254,0.8)";
+        ctx.lineWidth = 1;
+        ctx.beginPath();
+        ctx.moveTo(-w / 2 + 4, -h / 2 + 4);
+        ctx.lineTo(w / 2 - 4, h / 2 - 4);
+        ctx.moveTo(w / 2 - 4, -h / 2 + 4);
+        ctx.lineTo(-w / 2 + 4, h / 2 - 4);
+        ctx.stroke();
+        ctx.restore();
       }
       for (const d of entities.decoys) drawDecoyBody(ctx, d);
       for (const zone of entities.dangerZones) {
@@ -1794,6 +2407,43 @@
         ctx.arc(player.x, player.y, player.r + 7 + p * 3, 0, TAU);
         ctx.stroke();
       }
+      const heartsResistanceCount = getHeartsResistanceCardCount();
+      const heartsResistanceReady = heartsResistanceCount > 0 && state.elapsed >= inventory.heartsResistanceReadyAt;
+      if (heartsResistanceReady) {
+        ctx.strokeStyle = "rgba(252, 165, 165, 0.95)";
+        ctx.lineWidth = 2;
+        ctx.beginPath();
+        ctx.arc(player.x, player.y, player.r + 4, 0, TAU);
+        ctx.stroke();
+      }
+      if (heartsResistanceCount > 0 && !heartsResistanceReady) {
+        const cdDur = Math.max(1e-3, inventory.heartsResistanceCooldownDuration || getHeartsResistanceCooldown());
+        const rem = Math.max(0, inventory.heartsResistanceReadyAt - state.elapsed);
+        const t = clamp(1 - rem / cdDur, 0, 1);
+        const iconX = player.x;
+        const iconY = player.y + player.r + 20;
+        const r = 7;
+        const g = Math.round(148 + (191 - 148) * t);
+        const b = Math.round(163 + (255 - 163) * t);
+        ctx.strokeStyle = `rgb(${100},${g},${b})`;
+        ctx.lineWidth = 2;
+        ctx.beginPath();
+        ctx.arc(iconX, iconY, r, -Math.PI / 2, -Math.PI / 2 + TAU * t);
+        ctx.stroke();
+        ctx.strokeStyle = "rgba(100, 116, 139, 0.7)";
+        ctx.lineWidth = 1.5;
+        ctx.beginPath();
+        ctx.arc(iconX, iconY, r, -Math.PI / 2 + TAU * t, -Math.PI / 2 + TAU);
+        ctx.stroke();
+        ctx.strokeStyle = "rgba(226, 232, 240, 0.8)";
+        ctx.lineWidth = 1;
+        ctx.beginPath();
+        ctx.moveTo(iconX - 2, iconY - 2.5);
+        ctx.lineTo(iconX + 2, iconY - 2.5);
+        ctx.lineTo(iconX - 2, iconY + 2.5);
+        ctx.lineTo(iconX + 2, iconY + 2.5);
+        ctx.stroke();
+      }
       for (const ripple of entities.damageRipples) {
         const t = clamp(
           (state.elapsed - ripple.bornAt) / Math.max(1e-3, ripple.expiresAt - ripple.bornAt),
@@ -1813,6 +2463,26 @@
         drawCircle(ctx, player.x, player.y, player.r + 4, "#22d3ee", 0.3 * playerInvuln);
       } else if (state.elapsed < player.ultimateSpeedUntil) {
         drawCircle(ctx, player.x, player.y, player.r + 5, "#fde68a", 0.28 * playerInvuln);
+      }
+      for (const popup of entities.healPopups) {
+        const t = clamp((state.elapsed - popup.bornAt) / Math.max(1e-3, popup.expiresAt - popup.bornAt), 0, 1);
+        const y = popup.y - t * 18;
+        ctx.fillStyle = popup.color;
+        ctx.globalAlpha = 1 - t;
+        ctx.font = "bold 14px Arial";
+        ctx.textAlign = "center";
+        ctx.textBaseline = "middle";
+        ctx.fillText(popup.text, popup.x, y);
+        ctx.globalAlpha = 1;
+      }
+      if (passive.heartsShieldArc > 0) {
+        const facing = Math.atan2(player.facing.y, player.facing.x);
+        const arc = passive.heartsShieldArc * Math.PI / 180;
+        ctx.strokeStyle = "rgba(248, 113, 113, 0.8)";
+        ctx.lineWidth = 3;
+        ctx.beginPath();
+        ctx.arc(player.x, player.y, player.r + 30, facing - arc / 2, facing + arc / 2);
+        ctx.stroke();
       }
       if (!state.running && !deathAnimDone) {
         const t = clamp(deathElapsed / DEATH_ANIM_DURATION, 0, 1);
@@ -1840,7 +2510,14 @@
         ctx.fillRect(0, 0, world.w, world.h);
       }
       drawHud();
-      drawAbilityButtons();
+      updateAbilityButtons();
+      if (state.elapsed < inventory.dodgeTextUntil) {
+        ctx.fillStyle = "#e2e8f0";
+        ctx.font = "bold 22px Arial";
+        ctx.textAlign = "center";
+        ctx.textBaseline = "middle";
+        ctx.fillText("Dodge!", world.w / 2, 56);
+      }
       if (!state.running && deathAnimDone) {
         postFxCtx.clearRect(0, 0, world.w, world.h);
         postFxCtx.drawImage(canvas, 0, 0);
@@ -1876,6 +2553,7 @@
       requestAnimationFrame(loop);
     }
     function onAbilityKey(key) {
+      if (state.pausedForCard) return;
       if (key === abilities.dash.key) tryDash();
       if (key === abilities.burst.key) tryBurst();
       if (key === abilities.decoy.key) tryDecoy();
@@ -1883,6 +2561,27 @@
     }
     window.addEventListener("keydown", (event) => {
       const key = event.key.toLowerCase();
+      if (key.startsWith("arrow")) event.preventDefault();
+      if (state.manualPause) {
+        state.manualPause = false;
+        if (key === " ") return;
+      }
+      if (state.inventoryModalOpen && (key === "enter" || key === " " || key === "escape")) {
+        continueAfterLoadout();
+        return;
+      }
+      if (key === " " && !state.pausedForCard && !state.inventoryModalOpen) {
+        state.manualPause = true;
+        state.keys.clear();
+        cameraPanDir = 0;
+        return;
+      }
+      if (state.waitingForMovementResume) {
+        const movementInput = key.startsWith("arrow");
+        if (!movementInput) return;
+        state.waitingForMovementResume = false;
+        state.pausedForCard = false;
+      }
       if (key.startsWith("arrow")) state.keys.add(key);
       if (key === "a") cameraPanDir = -1;
       if (key === "d") cameraPanDir = 1;
@@ -1892,12 +2591,22 @@
     });
     window.addEventListener("keyup", (event) => {
       const key = event.key.toLowerCase();
+      if (key.startsWith("arrow")) event.preventDefault();
       if (key.startsWith("arrow")) state.keys.delete(key);
       if (key === "a" || key === "d") cameraPanDir = 0;
     });
     snapshotFolderButton.addEventListener("click", () => {
       chooseSnapshotFolder();
     });
+    if (cardPickupButton) {
+      cardPickupButton.addEventListener("click", () => continueAfterLoadout());
+    }
+    if (cardSkipButton) {
+      cardSkipButton.addEventListener("click", () => continueAfterLoadout());
+    }
+    if (cardCloseButton) {
+      cardCloseButton.addEventListener("click", () => continueAfterLoadout());
+    }
     resetGame();
     requestAnimationFrame(loop);
   }
@@ -1906,6 +2615,17 @@
   mountEscape({
     canvas: document.getElementById("game"),
     snapshotFolderButton: document.getElementById("snapshot-folder-button"),
-    snapshotStatus: document.getElementById("snapshot-status")
+    snapshotStatus: document.getElementById("snapshot-status"),
+    abilitySlots: Array.from(document.querySelectorAll(".ability-slot")),
+    cardSlotEls: Array.from(document.querySelectorAll("#card-slots .card-slot")),
+    backpackSlotEl: document.getElementById("backpack-slot"),
+    setBonusStatusEl: document.getElementById("set-bonus-status"),
+    cardModal: document.getElementById("card-modal"),
+    cardModalFace: document.getElementById("card-modal-face"),
+    modalSetBonusStatusEl: document.getElementById("modal-set-bonus-status"),
+    cardCloseButton: document.getElementById("card-close-button"),
+    cardPickupButton: document.getElementById("card-pickup-button"),
+    cardSkipButton: document.getElementById("card-skip-button"),
+    cardSwapRow: document.getElementById("card-swap-row")
   });
 })();
