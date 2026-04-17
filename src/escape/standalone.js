@@ -2518,6 +2518,18 @@
         ctx.textBaseline = "middle";
         ctx.fillText("Dodge!", world.w / 2, 56);
       }
+      if (state.manualPause && state.running) {
+        ctx.fillStyle = "rgba(2, 6, 23, 0.45)";
+        ctx.fillRect(0, 0, world.w, world.h);
+        ctx.fillStyle = "#f8fafc";
+        ctx.textAlign = "center";
+        ctx.textBaseline = "middle";
+        ctx.font = "bold 38px Arial";
+        ctx.fillText("Paused", world.w / 2, world.h / 2 - 10);
+        ctx.font = "16px Arial";
+        ctx.fillStyle = "#cbd5e1";
+        ctx.fillText("Press any key to resume", world.w / 2, world.h / 2 + 24);
+      }
       if (!state.running && deathAnimDone) {
         postFxCtx.clearRect(0, 0, world.w, world.h);
         postFxCtx.drawImage(canvas, 0, 0);
