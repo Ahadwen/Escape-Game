@@ -290,8 +290,22 @@
     const SPAWN_INTERVAL_START = 8;
     const SPAWN_INTERVAL_FLOOR = 1.5;
     const DANGER_RAMP_SECONDS = 300;
+    const KNIGHT_DIAMOND_BURST_SPEED_MULT = 2.6;
+    const KNIGHT_DIAMOND_BURST_DURATION_BONUS_SEC = 1.5;
+    const LATE_GAME_ELITE_SPAWN_SEC = 180;
+    const LASER_BLUE_COOLDOWN_SEC = 1.22;
+    const LASER_BLUE_WARN_SEC = 0.3;
+    const LASER_BLUE_PLAYER_SLOW_MULT = 0.8;
+    const LASER_BLUE_PLAYER_SLOW_SEC = 1.5;
     const HUNTER_SPEED_AGE_COEFF = 1.1;
     const SET_BONUS_SUIT_THRESHOLD = 7;
+    const SET_BONUS_SUIT_MAX = 13;
+    const HEARTS_13_DEATH_DEFY_CD_SEC = 30;
+    const SPADES_13_AURA_RADIUS_PX = 2 * 96;
+    const SPADES_13_ENEMY_DT_MULT = 0.7;
+    const CLUBS_13_HITBOX_MULT = 0.7;
+    const CLUBS_13_UNTARGETABLE_SEC = 1;
+    const PLAYER_BASE_HITBOX_R = 10;
     const CARD_RANK_SPAWN_WEIGHT_MAX = 24;
     const CARD_RANK_SPAWN_WEIGHT_MIN = 1;
     const ULTIMATE_ABILITY_COOLDOWN_SEC = 20;
@@ -414,7 +428,7 @@
     const player = {
       x: 96,
       y: 340,
-      r: 10,
+      r: PLAYER_BASE_HITBOX_R,
       hp: 10,
       maxHp: 10,
       speed: 198,
@@ -444,6 +458,12 @@
       deathCount: 0,
       snapshotPending: false,
       playerInvulnerableUntil: 0,
+      /** Clubs 13: enemies do not acquire the player as target; damage blocked. */
+      playerUntargetableUntil: 0,
+      /** Hearts 13: `elapsed` when death defiance may proc again. */
+      heartsDeathDefyReadyAt: 0,
+      /** Blue laser: movement slow until this `elapsed`. */
+      playerLaserSlowUntil: 0,
       playerTimelockUntil: 0,
       tempHp: 0,
       tempHpExpiry: 0,
@@ -525,6 +545,7 @@
       const a = new Array(14).fill(null);
       return a;
     }
+    let deckSuitCounts = { diamonds: 0, hearts: 0, clubs: 0, spades: 0 };
     const inventory = {
       deckByRank: makeEmptyDeckByRank(),
       backpackSlots: [null, null, null],
@@ -801,6 +822,8 @@
         else if (e.kind === "dashCharge") passive.dashChargesBonus += e.value;
         else if (e.kind === "frontShield") passive.heartsShieldArc += e.arc;
       });
+      deckSuitCounts = { ...suits };
+      player.r = suits.clubs >= SET_BONUS_SUIT_MAX ? PLAYER_BASE_HITBOX_R * CLUBS_13_HITBOX_MULT : PLAYER_BASE_HITBOX_R;
       if (suits.hearts >= SET_BONUS_SUIT_THRESHOLD) inventory.heartsRegenPerSec = 0.3;
       if (suits.clubs >= SET_BONUS_SUIT_THRESHOLD) inventory.clubsPhaseThroughTerrain = true;
       if (selectedCharacter.id === "rogue" && suits.diamonds >= SET_BONUS_SUIT_THRESHOLD) {
@@ -808,7 +831,10 @@
       }
       if (suits.spades >= SET_BONUS_SUIT_THRESHOLD) {
       }
-      if (selectedCharacter.id !== "rogue" && suits.diamonds >= SET_BONUS_SUIT_THRESHOLD && !inventory.diamondEmpower && !state.setBonusChoicePendingSuit) {
+      if (suits.diamonds >= SET_BONUS_SUIT_MAX && state.setBonusChoicePendingSuit === "diamonds") {
+        state.setBonusChoicePendingSuit = null;
+      }
+      if (selectedCharacter.id !== "rogue" && suits.diamonds >= SET_BONUS_SUIT_THRESHOLD && suits.diamonds < SET_BONUS_SUIT_MAX && !inventory.diamondEmpower && !state.setBonusChoicePendingSuit) {
         state.setBonusChoicePendingSuit = "diamonds";
       }
       dashState.maxCharges = 1 + passive.dashChargesBonus;
@@ -838,7 +864,7 @@
         if (selectedCharacter.id === "rogue") {
           lines.push("Set bonus! Diamonds: dash range and smoke radius increased.");
         } else {
-          const pick = inventory.diamondEmpower === "dash2x" ? "dash goes twice as far" : inventory.diamondEmpower === "speedPassive" ? "speed burst is passive" : inventory.diamondEmpower === "decoyLead" ? "decoy drifts away, cooldown -2s, duration +1s" : "choose your empowerment in inventory";
+          const pick = suits.diamonds >= SET_BONUS_SUIT_MAX ? "dash, burst, and decoy all empowered" : inventory.diamondEmpower === "dash2x" ? "dash goes twice as far" : inventory.diamondEmpower === "speedPassive" ? selectedCharacter.id === "knight" ? "speed burst: +30% boost, +1.5s on W (always on)" : "speed burst is passive" : inventory.diamondEmpower === "decoyLead" ? "decoy drifts away, cooldown -2s, duration +1s" : "choose your empowerment in inventory";
           lines.push(`Set bonus! Diamonds: ${pick}.`);
         }
       }
@@ -851,6 +877,20 @@
       if (suits.spades >= SET_BONUS_SUIT_THRESHOLD) {
         lines.push(
           selectedCharacter.id === "rogue" ? "Set bonus! Spades: dash from stealth snaps you back into stealth on landing (extra grace to hug cover)." : "Set bonus! Spades: using your ultimate (R) slows hunters, shots, and hazards to 30% speed for 2 seconds."
+        );
+      }
+      if (suits.diamonds >= SET_BONUS_SUIT_MAX && selectedCharacter.id === "rogue") {
+        lines.push("Set bonus! Diamonds (13): maximum dash, smoke, and consume tuning.");
+      }
+      if (suits.hearts >= SET_BONUS_SUIT_MAX) {
+        lines.push("Set bonus! Hearts (13): death defiance \u2014 survive a lethal hit at 5 HP (30s cooldown).");
+      }
+      if (suits.clubs >= SET_BONUS_SUIT_MAX) {
+        lines.push("Set bonus! Clubs (13): smaller hitbox; 1s untargetable after taking a hit.");
+      }
+      if (suits.spades >= SET_BONUS_SUIT_MAX) {
+        lines.push(
+          "Set bonus! Spades (13): hostiles near you (~2in) move and shoot ~30% slower while in the aura."
         );
       }
       return lines;
@@ -896,6 +936,19 @@
       });
       return suits;
     }
+    function diamondsOmniEmpowerActive() {
+      return deckSuitCounts.diamonds >= SET_BONUS_SUIT_MAX;
+    }
+    function knightDiamondBurstEmpowerActive() {
+      return selectedCharacter.id === "knight" && (inventory.diamondEmpower === "speedPassive" || diamondsOmniEmpowerActive());
+    }
+    function spades13AuraEnemyDtMult(worldX, worldY) {
+      if (deckSuitCounts.spades < SET_BONUS_SUIT_MAX) return 1;
+      const dx = worldX - player.x;
+      const dy = worldY - player.y;
+      if (dx * dx + dy * dy <= SPADES_13_AURA_RADIUS_PX * SPADES_13_AURA_RADIUS_PX) return SPADES_13_ENEMY_DT_MULT;
+      return 1;
+    }
     function suitDisplayNameForModal(suit) {
       return { diamonds: "Diamonds", hearts: "Hearts", clubs: "Clubs", spades: "Spades" }[suit] ?? suit;
     }
@@ -913,26 +966,61 @@
       return "";
     }
     function diamondsActiveSummary() {
+      if (diamondsOmniEmpowerActive()) {
+        return selectedCharacter.id === "rogue" ? "maximum dash, smoke, and consume tuning" : "all three diamond empowerments active";
+      }
       if (selectedCharacter.id === "rogue") return "larger dash & smoke radius";
       if (inventory.diamondEmpower === "dash2x") return "dash goes twice as far";
-      if (inventory.diamondEmpower === "speedPassive") return "speed burst is passive";
+      if (inventory.diamondEmpower === "speedPassive") {
+        return selectedCharacter.id === "knight" ? "speed burst: +30% boost, +1.5s burst duration (always on)" : "speed burst is passive";
+      }
       if (inventory.diamondEmpower === "decoyLead") return "decoy drifts, shorter cooldown, longer life";
       return "choose empowerment below";
+    }
+    function suitSetBonusSevenActiveShort(suit) {
+      if (suit === "diamonds") return diamondsActiveSummary();
+      if (suit === "hearts") return "passive HP regeneration";
+      if (suit === "clubs") {
+        return selectedCharacter.id === "rogue" ? "phase through terrain while inside smoke" : "burst phase-through terrain";
+      }
+      return selectedCharacter.id === "rogue" ? "stealth refresh on stealth-dash landing" : "after ultimate: 30% world speed for 2s";
+    }
+    function suitSetBonusTierTwoGoalLabel(suit) {
+      if (suit === "hearts") return "death defiance on 30s cooldown (lethal \u2192 5 HP)";
+      if (suit === "diamonds") {
+        return selectedCharacter.id === "rogue" ? "stronger dash, smoke, and consume together" : "all three abilities empowered at once";
+      }
+      if (suit === "clubs") return "30% smaller hitbox; 1s untargetable after a hit";
+      if (suit === "spades") return "~2in aura: hostiles inside slowed ~30%";
+      return "";
+    }
+    function suitSetBonusTierTwoActiveShort(suit) {
+      if (suit === "hearts") return "death defiance (30s CD \u2192 5 HP)";
+      if (suit === "diamonds") {
+        return selectedCharacter.id === "rogue" ? "maximum diamond mobility" : "all three empowerments active";
+      }
+      if (suit === "clubs") return "smaller hitbox; untargetable 1s on hit";
+      if (suit === "spades") return "nearby hostiles slowed ~30% in aura";
+      return "";
     }
     function getModalSetBonusProgressLines() {
       const suits = countSuitsInActiveSlots();
       const lines = [];
-      const T = SET_BONUS_SUIT_THRESHOLD;
+      const T7 = SET_BONUS_SUIT_THRESHOLD;
+      const T13 = SET_BONUS_SUIT_MAX;
       for (const suit of MODAL_SET_SUIT_ORDER) {
         const n = suits[suit];
         if (n < 1) continue;
         const name = suitDisplayNameForModal(suit);
-        const goal = suitSetBonusGoalLabel(suit);
-        if (n >= T) {
-          const active = suit === "diamonds" ? diamondsActiveSummary() : suit === "hearts" ? "passive HP regeneration" : suit === "clubs" ? selectedCharacter.id === "rogue" ? "phase through terrain while inside smoke" : "burst phase-through terrain" : selectedCharacter.id === "rogue" ? "stealth refresh on stealth-dash landing" : "after ultimate: 30% world speed for 2s";
-          lines.push(`${name} set bonus ${T}/${T} (${active})`);
+        if (n < T7) {
+          lines.push(`${name} ${n}/${T7} (${suitSetBonusGoalLabel(suit)})`);
+          continue;
+        }
+        lines.push(`${name} ${T7}/${T7} (${suitSetBonusSevenActiveShort(suit)})`);
+        if (n < T13) {
+          lines.push(`${name} ${n}/${T13} (${suitSetBonusTierTwoGoalLabel(suit)})`);
         } else {
-          lines.push(`${name} set bonus ${n}/${T} (${goal})`);
+          lines.push(`${name} ${T13}/${T13} (${suitSetBonusTierTwoActiveShort(suit)})`);
         }
       }
       return lines;
@@ -1023,6 +1111,20 @@
       }
       parent.appendChild(cell);
     }
+    function rankDeckIsCompletelyEmpty() {
+      for (let rank = 1; rank <= 13; rank++) {
+        if (inventory.deckByRank[rank]) return false;
+      }
+      return true;
+    }
+    function cardModalInventoryDragHintHtml() {
+      return `<aside class="card-face-hint" aria-label="How to use inventory">
+    <strong>Using inventory</strong>
+    <p><strong>Click and hold</strong> a card, then <strong>drag</strong> it to a slot and <strong>release</strong> to drop.</p>
+    <p>Put this pickup on its <strong>matching rank</strong> in the deck row above, into a <strong>backpack</strong> pack, or swap with the <strong>New pickup</strong> / <strong>Card slot</strong> areas below.</p>
+    <p><strong>Leave</strong> closes the window (an unplaced pickup is discarded).</p>
+  </aside>`;
+    }
     function renderCardModal() {
       if (!cardModal || !cardModalFace || !cardSwapRow) return;
       if (modalDeckStripEl) modalDeckStripEl.innerHTML = "";
@@ -1066,16 +1168,36 @@
         const r = state.pendingCard?.rank ?? state.pickupTargetRank;
         if (r != null) {
           const showCard = state.pendingCard || inventory.deckByRank[r] || null;
+          const showFirstCardHint = rankDeckIsCompletelyEmpty();
           if (showCard) {
             cardModalFace.classList.remove("compact");
-            cardModalFace.innerHTML = `<div class="big">${formatCardName(showCard)}</div><div class="desc">${describeCardEffect(showCard)}</div>`;
+            if (showFirstCardHint) {
+              cardModalFace.innerHTML = `<div class="card-face-layout"><div class="card-face-primary"><div class="big">${formatCardName(
+                showCard
+              )}</div><div class="desc">${describeCardEffect(showCard)}</div></div>${cardModalInventoryDragHintHtml()}</div>`;
+            } else {
+              cardModalFace.innerHTML = `<div class="big">${formatCardName(showCard)}</div><div class="desc">${describeCardEffect(showCard)}</div>`;
+            }
           } else {
-            cardModalFace.classList.add("compact");
-            cardModalFace.innerHTML = `<div class="desc">Rank <strong>${cardRankText(r)}</strong> \u2014 empty. Use <strong>New pickup</strong> or a backpack slot below, or <strong>Leave</strong>.</div>`;
+            if (showFirstCardHint) {
+              cardModalFace.classList.remove("compact");
+              cardModalFace.innerHTML = `<div class="card-face-layout"><div class="card-face-primary"><div class="desc">Rank <strong>${cardRankText(
+                r
+              )}</strong> \u2014 empty. Use <strong>New pickup</strong> or a backpack slot below, or <strong>Leave</strong>.</div></div>${cardModalInventoryDragHintHtml()}</div>`;
+            } else {
+              cardModalFace.classList.add("compact");
+              cardModalFace.innerHTML = `<div class="desc">Rank <strong>${cardRankText(r)}</strong> \u2014 empty. Use <strong>New pickup</strong> or a backpack slot below, or <strong>Leave</strong>.</div>`;
+            }
           }
         } else {
-          cardModalFace.classList.add("compact");
-          cardModalFace.innerHTML = '<div class="desc">Drag a card into <strong>New pickup</strong> from a backpack slot or the rank row above, or <strong>Leave</strong>.</div>';
+          const showFirstHintNoRank = state.cardPickupFlowActive && rankDeckIsCompletelyEmpty();
+          if (showFirstHintNoRank) {
+            cardModalFace.classList.remove("compact");
+            cardModalFace.innerHTML = `<div class="card-face-layout"><div class="card-face-primary"><div class="desc">Drag a card into <strong>New pickup</strong> from a backpack slot or the rank row above, or <strong>Leave</strong>.</div></div>${cardModalInventoryDragHintHtml()}</div>`;
+          } else {
+            cardModalFace.classList.add("compact");
+            cardModalFace.innerHTML = '<div class="desc">Drag a card into <strong>New pickup</strong> from a backpack slot or the rank row above, or <strong>Leave</strong>.</div>';
+          }
         }
       } else if (state.pendingCard) {
         const card = state.pendingCard;
@@ -1128,7 +1250,12 @@
           return btn;
         };
         cardSwapRow.appendChild(mk("dash2x", "Dash goes twice as far"));
-        cardSwapRow.appendChild(mk("speedPassive", "Speed burst is passive"));
+        cardSwapRow.appendChild(
+          mk(
+            "speedPassive",
+            selectedCharacter.id === "knight" ? "Burst: +30% speed boost, +1.5s duration (passive)" : "Speed burst is passive"
+          )
+        );
         cardSwapRow.appendChild(mk("decoyLead", "Decoy drifts away, -2s cooldown, +1s duration"));
       }
       const leaveBtn = document.createElement("button");
@@ -1449,6 +1576,25 @@
         r
       };
     }
+    function nearestLegalPointForSmallHunter(cx, cy, r) {
+      const center = { x: cx, y: cy, r };
+      if (!collidesAnyObstacle(center) && !outOfBoundsCircle(center)) return center;
+      const STEP = 5;
+      const ANGLES = 32;
+      const MAX_R = 260;
+      for (let rad = STEP; rad <= MAX_R; rad += STEP) {
+        for (let i = 0; i < ANGLES; i++) {
+          const ang = i / ANGLES * TAU;
+          const cand = { x: cx + Math.cos(ang) * rad, y: cy + Math.sin(ang) * rad, r };
+          if (!outOfBoundsCircle(cand) && !collidesAnyObstacle(cand)) return cand;
+        }
+      }
+      return randomOpenPoint(r);
+    }
+    function resolveFastSpawnNearAirSpawner(h, fastR) {
+      const ideal = randomOpenPointAround(h.x, h.y, h.r + 12, h.r + 40, fastR, 56);
+      return nearestLegalPointForSmallHunter(ideal.x, ideal.y, fastR);
+    }
     function selectCharacter(id) {
       const picked = CHARACTERS[id];
       if (!picked) return;
@@ -1608,6 +1754,9 @@
       state.damageEvents = [];
       state.snapshotPending = false;
       state.playerInvulnerableUntil = 0;
+      state.playerUntargetableUntil = 0;
+      state.heartsDeathDefyReadyAt = 0;
+      state.playerLaserSlowUntil = 0;
       state.playerTimelockUntil = 0;
       state.tempHp = 0;
       state.tempHpExpiry = 0;
@@ -1701,6 +1850,7 @@
       dashState.maxCharges = 1;
       dashState.charges = 1;
       dashState.nextRechargeAt = 0;
+      recalcCardPassives();
       ensureTilesForPlayer();
       cameraX = player.x - VIEW_W / 2;
       cameraY = player.y - VIEW_H / 2;
@@ -1734,8 +1884,12 @@
           return { light: "#fbcfe8", core: "#db2777", shadow: "#831843", rim: "#f9a8d4", mark: "#fdf2f8" };
         case "laser":
           return { light: "#fecaca", core: "#ef4444", shadow: "#7f1d1d", rim: "#f87171", mark: "#fef2f2" };
+        case "laserBlue":
+          return { light: "#bfdbfe", core: "#2563eb", shadow: "#1e3a8a", rim: "#60a5fa", mark: "#eff6ff" };
         case "spawner":
           return { light: "#fecdd3", core: "#e11d48", shadow: "#881337", rim: "#fb7185", mark: "#fff1f2" };
+        case "airSpawner":
+          return { light: "#ddd6fe", core: "#7c3aed", shadow: "#4c1d95", rim: "#a78bfa", mark: "#f5f3ff" };
         case "ranged":
           return { light: "#bae6fd", core: "#0284c7", shadow: "#0c4a6e", rim: "#38bdf8", mark: "#f0f9ff" };
         case "fast":
@@ -2029,6 +2183,16 @@
         h.laserCooldown = 1;
         h.laserWarning = 0.42;
         h.laserAim = null;
+      } else if (type === "laserBlue") {
+        r = 13;
+        life = 8;
+        lastShotAt = state.elapsed + rand(0.5, 1);
+        h.laserState = "move";
+        h.aimStartedAt = 0;
+        h.nextLaserReadyAt = state.elapsed + rand(0.55, 1.1);
+        h.laserCooldown = LASER_BLUE_COOLDOWN_SEC;
+        h.laserWarning = LASER_BLUE_WARN_SEC;
+        h.laserAim = null;
       } else if (type === "fast") {
         r = 9;
         life = 2;
@@ -2041,6 +2205,16 @@
         h.spawnActiveUntil = state.elapsed + 8;
         h.nextSwarmAt = h.spawnDelayUntil;
         h.swarmInterval = 0.6;
+        h.swarmN = 5;
+        h.fastR = 10;
+      } else if (type === "airSpawner") {
+        r = 26;
+        life = 9;
+        lastShotAt = state.elapsed + 999;
+        h.spawnDelayUntil = state.elapsed + 2.1;
+        h.spawnActiveUntil = state.elapsed + 9;
+        h.nextSwarmAt = h.spawnDelayUntil;
+        h.swarmInterval = 0.62;
         h.swarmN = 5;
         h.fastR = 10;
       }
@@ -2061,6 +2235,11 @@
       entities.hunters.push(h);
     }
     function pickRegularHunterType() {
+      if (state.elapsed >= LATE_GAME_ELITE_SPAWN_SEC) {
+        const er = Math.random();
+        if (er < 0.055) return "airSpawner";
+        if (er < 0.11) return "laserBlue";
+      }
       const roll = Math.random();
       if (roll < 0.25) return "chaser";
       if (roll < 0.44) return "cutter";
@@ -2070,7 +2249,12 @@
       return "spawner";
     }
     function hunterRadiusForType(type) {
-      return type === "sniper" ? 12 : type === "spawner" ? 18 : type === "laser" ? 13 : type === "fast" ? 9 : 10;
+      if (type === "sniper") return 12;
+      if (type === "spawner") return 18;
+      if (type === "airSpawner") return 26;
+      if (type === "laser" || type === "laserBlue") return 13;
+      if (type === "fast") return 9;
+      return 10;
     }
     function scheduleWaveSpawns() {
       const jobs = [];
@@ -2202,7 +2386,7 @@
       }
       let seen = false;
       for (const h of entities.hunters) {
-        if (h.type === "spawner") continue;
+        if (h.type === "spawner" || h.type === "airSpawner") continue;
         if (state.elapsed < (h.stunnedUntil || 0)) continue;
         if (hasLineOfSight(h, player)) {
           seen = true;
@@ -2215,7 +2399,7 @@
     function anyOtherEnemyHasLineOfSightToPlayer(excludedHunter) {
       for (const h of entities.hunters) {
         if (h === excludedHunter) continue;
-        if (h.type === "spawner") continue;
+        if (h.type === "spawner" || h.type === "airSpawner") continue;
         if (state.elapsed < (h.stunnedUntil || 0)) continue;
         if (hasLineOfSight(h, player)) return true;
       }
@@ -2320,7 +2504,11 @@
       return { x: player.facing.x || 1, y: player.facing.y || 0 };
     }
     function currentDashRange() {
-      return selectedCharacter.id === "rogue" ? inventory.rogueDiamondRangeBoost ? 180 : 120 : inventory.diamondEmpower === "dash2x" ? 240 : 120;
+      if (selectedCharacter.id === "rogue") {
+        if (deckSuitCounts.diamonds >= SET_BONUS_SUIT_MAX) return 220;
+        return inventory.rogueDiamondRangeBoost ? 180 : 120;
+      }
+      return inventory.diamondEmpower === "dash2x" || diamondsOmniEmpowerActive() ? 240 : 120;
     }
     function computeDashTarget() {
       const dir = currentDashDirection();
@@ -2362,7 +2550,7 @@
         entities.smokeZones.push({
           x: player.x,
           y: player.y,
-          r: inventory.rogueDiamondRangeBoost ? 260 : 180,
+          r: deckSuitCounts.diamonds >= SET_BONUS_SUIT_MAX ? 300 : inventory.rogueDiamondRangeBoost ? 260 : 180,
           bornAt: state.elapsed,
           expiresAt: state.elapsed + (ability.duration ?? 3)
         });
@@ -2372,7 +2560,8 @@
       }
       const burstCd = effectiveAbilityCooldown("burst", ability.cooldown, ability.minCooldown ?? 0.4);
       ability.nextReadyAt = state.elapsed + burstCd;
-      player.burstUntil = state.elapsed + ability.duration;
+      const burstDurBonus = knightDiamondBurstEmpowerActive() ? KNIGHT_DIAMOND_BURST_DURATION_BONUS_SEC : 0;
+      player.burstUntil = state.elapsed + ability.duration + burstDurBonus;
       if (selectedCharacter.id !== "rogue" && passive.invisOnBurst > 0) {
         inventory.clubsInvisUntil = Math.max(inventory.clubsInvisUntil, state.elapsed + passive.invisOnBurst);
       }
@@ -2385,7 +2574,7 @@
         state.rogueFoodSenseUntil = Math.max(state.rogueFoodSenseUntil, state.elapsed + ROGUE_FOOD_SENSE_DURATION);
         return;
       }
-      const decoyEmpower = inventory.diamondEmpower === "decoyLead";
+      const decoyEmpower = inventory.diamondEmpower === "decoyLead" || diamondsOmniEmpowerActive();
       const decoyCd = effectiveAbilityCooldown("decoy", ability.cooldown, ability.minCooldown ?? 0.4, decoyEmpower ? 2 : 0);
       ability.nextReadyAt = state.elapsed + decoyCd;
       entities.decoys.push({
@@ -2402,7 +2591,7 @@
         const d2 = distSq(player, h);
         if (d2 > burstRadius * burstRadius) continue;
         const away = vectorToTarget(player, h);
-        const push = h.type === "spawner" ? 0 : 95;
+        const push = h.type === "spawner" || h.type === "airSpawner" ? 0 : 95;
         const test = { x: h.x + away.x * push, y: h.y + away.y * push, r: h.r };
         if (!outOfBoundsCircle(test) && !collidesAnyObstacle(test)) {
           h.x = test.x;
@@ -2516,6 +2705,9 @@
       return best;
     }
     function pickTargetForHunter(hunter) {
+      if (state.elapsed < state.playerUntargetableUntil) {
+        return nearestDecoy(hunter) || { x: hunter.x + hunter.dir.x * 40, y: hunter.y + hunter.dir.y * 40 };
+      }
       if (selectedCharacter.id === "rogue") {
         if (state.elapsed < inventory.spadesLandingStealthUntil) {
           return nearestDecoy(hunter) || { x: hunter.x + hunter.dir.x * 40, y: hunter.y + hunter.dir.y * 40 };
@@ -2581,10 +2773,24 @@
       for (const h of entities.hunters) {
         if (h.type === "spawner") continue;
         if (state.elapsed < (h.stunnedUntil || 0)) continue;
+        const spDt = dt * spades13AuraEnemyDtMult(h.x, h.y);
+        if (h.type === "airSpawner") {
+          const target = pickTargetForHunter(h);
+          const desired2 = vectorToTarget(h, target);
+          const steer2 = avoidObstacles(h, desired2);
+          const airSpeed = 84;
+          h.dir.x = h.dir.x * 0.72 + steer2.x * 0.28;
+          h.dir.y = h.dir.y * 0.72 + steer2.y * 0.28;
+          const alen = Math.hypot(h.dir.x, h.dir.y) || 1;
+          h.dir.x /= alen;
+          h.dir.y /= alen;
+          moveCircleWithCollisions(h, h.dir.x * airSpeed, h.dir.y * airSpeed, spDt, { ignoreObstacles: true });
+          continue;
+        }
         const lifeSpan = h.life || Math.max(1e-4, h.dieAt - h.bornAt);
         const age = clamp((state.elapsed - h.bornAt) / lifeSpan, 0, 1);
         const speedFactor = 1 + age * HUNTER_SPEED_AGE_COEFF;
-        const baseSpeed = h.type === "sniper" ? 100 : h.type === "cutter" ? 116 : h.type === "laser" ? 138 : h.type === "ranged" ? 85 : h.type === "fast" ? 150 : 110;
+        const baseSpeed = h.type === "sniper" ? 100 : h.type === "cutter" ? 116 : h.type === "laser" || h.type === "laserBlue" ? h.type === "laserBlue" ? 156 : 138 : h.type === "ranged" ? 85 : h.type === "fast" ? 150 : 110;
         let speed = baseSpeed * speedFactor;
         const rogueInSeekMode = selectedCharacter.id === "rogue" && state.elapsed > state.rogueAlertUntil;
         if (rogueInSeekMode) speed *= 0.58;
@@ -2600,7 +2806,7 @@
           const plen = Math.hypot(h.dir.x, h.dir.y) || 1;
           h.dir.x /= plen;
           h.dir.y /= plen;
-          moveCircleWithCollisions(h, h.dir.x * speed * 0.38, h.dir.y * speed * 0.38, dt);
+          moveCircleWithCollisions(h, h.dir.x * speed * 0.38, h.dir.y * speed * 0.38, spDt);
           continue;
         }
         let desired;
@@ -2626,7 +2832,8 @@
           const away = vectorToTarget(target, h);
           const toward = vectorToTarget(h, target);
           desired = d2 < 240 * 240 ? away : toward;
-        } else if (h.type === "laser") {
+        } else if (h.type === "laser" || h.type === "laserBlue") {
+          const isBlue = h.type === "laserBlue";
           const target = pickTargetForHunter(h);
           const los = hasLineOfSight(h, target);
           if (h.laserState === "aim") {
@@ -2645,12 +2852,13 @@
                 bornAt: state.elapsed,
                 expiresAt: state.elapsed + 0.5,
                 warning: false,
-                active: true
+                active: true,
+                blueLaser: isBlue
               });
-              spawnAttackRing(h.x, h.y, h.r + 9, "#ef4444", 0.16);
+              spawnAttackRing(h.x, h.y, h.r + 9, isBlue ? "#3b82f6" : "#ef4444", 0.16);
               if (!hitDecoyAlongSegment(aim.x1, aim.y1, aim.x2, aim.y2, 5)) {
                 const hitDist = pointToSegmentDistance(player.x, player.y, aim.x1, aim.y1, aim.x2, aim.y2);
-                if (hitDist <= player.r + 5) damagePlayer(2);
+                if (hitDist <= player.r + 5) damagePlayer(2, isBlue ? { laserBlueSlow: true } : {});
               }
               h.laserState = "move";
               h.laserAim = null;
@@ -2673,7 +2881,8 @@
               bornAt: state.elapsed,
               expiresAt: state.elapsed + h.laserWarning,
               warning: true,
-              active: false
+              active: false,
+              blueLaser: isBlue
             });
             continue;
           }
@@ -2699,7 +2908,7 @@
           }
           if (h.chaserDashPhase === "dashing") {
             const dashSpeed = 405 * speedFactor;
-            const stepLen = Math.min(dashSpeed * dt, 24);
+            const stepLen = Math.min(dashSpeed * spDt, 24);
             const nx = h.x + h.chaserDashDir.x * stepLen;
             const ny = h.y + h.chaserDashDir.y * stepLen;
             const test = { x: nx, y: ny, r: h.r };
@@ -2737,7 +2946,7 @@
         const dlen = Math.hypot(h.dir.x, h.dir.y) || 1;
         h.dir.x /= dlen;
         h.dir.y /= dlen;
-        moveCircleWithCollisions(h, h.dir.x * speed, h.dir.y * speed, dt);
+        moveCircleWithCollisions(h, h.dir.x * speed, h.dir.y * speed, spDt);
       }
     }
     function updateRangedAttackers(dt) {
@@ -2763,8 +2972,9 @@
       }
       for (let i = entities.projectiles.length - 1; i >= 0; i--) {
         const p = entities.projectiles[i];
-        p.x += p.vx * dt;
-        p.y += p.vy * dt;
+        const sp = spades13AuraEnemyDtMult(p.x, p.y);
+        p.x += p.vx * dt * sp;
+        p.y += p.vy * dt * sp;
         const circle = { x: p.x, y: p.y, r: p.r };
         if (state.elapsed - p.bornAt > p.life || outOfBoundsCircle(circle) || collidesAnyObstacle(circle)) {
           entities.projectiles.splice(i, 1);
@@ -2785,7 +2995,7 @@
     }
     function updateSpawners(dt) {
       for (const h of entities.hunters) {
-        if (h.type !== "spawner") continue;
+        if (h.type !== "spawner" && h.type !== "airSpawner") continue;
         if (state.elapsed < h.spawnDelayUntil) continue;
         if (state.elapsed >= h.spawnActiveUntil) continue;
         if (state.elapsed < h.nextSwarmAt) continue;
@@ -2793,11 +3003,11 @@
         while (state.elapsed >= h.nextSwarmAt && safety < 4) {
           h.nextSwarmAt += h.swarmInterval;
           safety++;
-          spawnAttackRing(h.x, h.y, h.r + 12, "#fb7185", 0.12);
+          spawnAttackRing(h.x, h.y, h.r + 12, h.type === "airSpawner" ? "#a78bfa" : "#fb7185", 0.12);
           const fastR = h.fastR || 10;
           const swarmN = h.swarmN || 5;
           for (let i = 0; i < swarmN; i++) {
-            const open = randomOpenPointAround(h.x, h.y, h.r + 16, h.r + 34, fastR, 25);
+            const open = h.type === "airSpawner" ? resolveFastSpawnNearAirSpawner(h, fastR) : randomOpenPointAround(h.x, h.y, h.r + 16, h.r + 34, fastR, 25);
             spawnHunter("fast", open.x, open.y);
           }
         }
@@ -2820,11 +3030,12 @@
       }
       return false;
     }
-    function damagePlayer(amount) {
+    function damagePlayer(amount, opts = {}) {
       if (!state.running) return;
       if (selectedCharacter.id === "rogue" && state.rogueStealthActive) return;
       if (selectedCharacter.id === "rogue" && state.elapsed < inventory.spadesLandingStealthUntil) return;
       if (state.elapsed < state.playerInvulnerableUntil) return;
+      if (state.elapsed < state.playerUntargetableUntil) return;
       if (amount <= 0) return;
       if (state.elapsed < inventory.clubsInvisUntil) return;
       if (cdr(abilities.dash) > 0 && Math.random() < passive.dodgeChanceWhenDashCd) {
@@ -2846,6 +3057,12 @@
         if (state.tempHp <= 0) clearTempHp();
       }
       if (rem > 0) player.hp = Math.max(0, player.hp - rem);
+      if (rem > 0 && deckSuitCounts.clubs >= SET_BONUS_SUIT_MAX) {
+        state.playerUntargetableUntil = state.elapsed + CLUBS_13_UNTARGETABLE_SEC;
+      }
+      if (opts.laserBlueSlow) {
+        state.playerLaserSlowUntil = state.elapsed + LASER_BLUE_PLAYER_SLOW_SEC;
+      }
       state.hurtFlash = 0.16;
       state.playerInvulnerableUntil = state.elapsed + 0.35;
       state.screenShakeUntil = state.elapsed + 0.18;
@@ -2863,6 +3080,13 @@
         }
       }
       if (player.hp <= 0) {
+        if (deckSuitCounts.hearts >= SET_BONUS_SUIT_MAX && state.elapsed >= state.heartsDeathDefyReadyAt) {
+          player.hp = 5;
+          state.heartsDeathDefyReadyAt = state.elapsed + HEARTS_13_DEATH_DEFY_CD_SEC;
+          state.playerInvulnerableUntil = state.elapsed + 0.55;
+          spawnHealPopup(player.x, player.y - player.r - 16, "DEFIED", "#fb7185", 1.1, 17);
+          return;
+        }
         state.deathCount += 1;
         if (deathSnapshotsEnabled) state.snapshotPending = true;
         state.running = false;
@@ -2976,10 +3200,10 @@
       return Math.max(0, ability.nextReadyAt - state.elapsed);
     }
     function updateSpecialAbilityEffects(dt) {
-      if (inventory.diamondEmpower === "decoyLead") {
+      if (inventory.diamondEmpower === "decoyLead" || diamondsOmniEmpowerActive()) {
         for (const d of entities.decoys) {
           const away = vectorToTarget(player, d);
-          moveCircleWithCollisions(d, away.x * 110, away.y * 110, dt);
+          moveCircleWithCollisions(d, away.x * 110, away.y * 110, dt * spades13AuraEnemyDtMult(d.x, d.y));
         }
       }
       for (let i = entities.shields.length - 1; i >= 0; i--) {
@@ -2995,7 +3219,7 @@
       }
       for (const shield of entities.shields) {
         for (const h of entities.hunters) {
-          if (h.type === "spawner") continue;
+          if (h.type === "spawner" || h.type === "airSpawner") continue;
           const rr = shield.r + h.r;
           if (distSq(shield, h) > rr * rr) continue;
           const away = vectorToTarget(player, h);
@@ -3039,7 +3263,7 @@
         const halfArc = passive.heartsShieldArc * Math.PI / 360;
         const shieldR = player.r + 30;
         for (const h of entities.hunters) {
-          if (h.type === "spawner") continue;
+          if (h.type === "spawner" || h.type === "airSpawner") continue;
           const dx = h.x - player.x;
           const dy = h.y - player.y;
           const d = Math.hypot(dx, dy) || 1;
@@ -3079,7 +3303,7 @@
         if (beam.warning || !beam.active) continue;
         if (!hitDecoyAlongSegment(beam.x1, beam.y1, beam.x2, beam.y2, 5)) {
           const hitDist = pointToSegmentDistance(player.x, player.y, beam.x1, beam.y1, beam.x2, beam.y2);
-          if (hitDist <= player.r + 5) damagePlayer(2);
+          if (hitDist <= player.r + 5) damagePlayer(2, beam.blueLaser ? { laserBlueSlow: true } : {});
         }
       }
     }
@@ -3190,7 +3414,8 @@
         mx = 0;
         my = 0;
       }
-      const wBurstMult = inventory.diamondEmpower === "speedPassive" || state.elapsed < player.burstUntil ? 2 : 1;
+      const burstSpeedLeg = inventory.diamondEmpower === "speedPassive" || diamondsOmniEmpowerActive() || state.elapsed < player.burstUntil;
+      const wBurstMult = burstSpeedLeg ? knightDiamondBurstEmpowerActive() ? KNIGHT_DIAMOND_BURST_SPEED_MULT : 2 : 1;
       const ultSpeedMult = state.elapsed < player.ultimateSpeedUntil ? 1.75 : 1;
       const terrainMult = state.elapsed < inventory.spadesObstacleBoostUntil ? 1 + passive.obstacleTouchMult : 1;
       const burstBonus = Math.max(0, Math.max(wBurstMult, ultSpeedMult) - 1);
@@ -3199,7 +3424,8 @@
       const hungerLeftRatio = selectedCharacter.id === "rogue" ? clamp(state.rogueHunger / Math.max(1e-3, state.rogueHungerMax), 0, 1) : 1;
       const rogueDesperationSpeed = selectedCharacter.id === "rogue" ? (1 - hungerLeftRatio) * ROGUE_DESPERATION_SPEED_MAX : 0;
       const speedMult = 1 + burstBonus + passiveBonus + terrainBonus + rogueDesperationSpeed;
-      const effectiveSpeed = player.speed * speedMult * playerSpeedHealthMultiplier();
+      const laserSlowMult = state.elapsed < state.playerLaserSlowUntil ? LASER_BLUE_PLAYER_SLOW_MULT : 1;
+      const effectiveSpeed = player.speed * speedMult * playerSpeedHealthMultiplier() * laserSlowMult;
       const moving = mx !== 0 || my !== 0;
       const phaseThrough = inventory.clubsPhaseThroughTerrain && (selectedCharacter.id === "rogue" ? playerInsideSmoke() : state.elapsed < player.burstUntil);
       const moveRes = moveCircleWithCollisions(player, mx * effectiveSpeed, my * effectiveSpeed, dt, {
@@ -3330,7 +3556,7 @@
       const burstReduction = Math.max(0, passive.cooldownFlat.burst || 0);
       const decoyReduction = Math.max(
         0,
-        (passive.cooldownFlat.decoy || 0) + (selectedCharacter.id === "knight" && inventory.diamondEmpower === "decoyLead" ? 2 : 0)
+        (passive.cooldownFlat.decoy || 0) + (selectedCharacter.id === "knight" && (inventory.diamondEmpower === "decoyLead" || diamondsOmniEmpowerActive()) ? 2 : 0)
       );
       const dashPct = Math.max(0, passive.cooldownPct.dash || 0);
       const burstPct = Math.max(0, passive.cooldownPct.burst || 0);
@@ -3367,7 +3593,7 @@
             "decoy",
             abilities.decoy.cooldown,
             abilities.decoy.minCooldown ?? 0.4,
-            selectedCharacter.id === "knight" && inventory.diamondEmpower === "decoyLead" ? 2 : 0
+            selectedCharacter.id === "knight" && (inventory.diamondEmpower === "decoyLead" || diamondsOmniEmpowerActive()) ? 2 : 0
           ),
           extra: ""
         },
@@ -3823,13 +4049,18 @@
             1
           );
           const pulse = 0.55 + 0.45 * (0.5 + 0.5 * Math.sin(state.elapsed * 30));
-          ctx.strokeStyle = `rgba(248, 113, 113, ${0.35 + 0.55 * pulse})`;
-          ctx.lineWidth = 3 + pulse * 6;
+          if (beam.blueLaser) {
+            ctx.strokeStyle = `rgba(96, 165, 250, ${0.38 + 0.52 * pulse})`;
+            ctx.lineWidth = 3 + pulse * 5;
+          } else {
+            ctx.strokeStyle = `rgba(248, 113, 113, ${0.35 + 0.55 * pulse})`;
+            ctx.lineWidth = 3 + pulse * 6;
+          }
           ctx.setLineDash([18, 10]);
           ctx.lineDashOffset = -state.elapsed * 140;
         } else {
-          ctx.strokeStyle = "rgba(239, 68, 68, 0.95)";
-          ctx.lineWidth = 6;
+          ctx.strokeStyle = beam.blueLaser ? "rgba(37, 99, 235, 0.95)" : "rgba(239, 68, 68, 0.95)";
+          ctx.lineWidth = beam.blueLaser ? 5.5 : 6;
           ctx.setLineDash([]);
         }
         ctx.beginPath();
@@ -3839,24 +4070,26 @@
         ctx.setLineDash([]);
       }
       for (const h of entities.hunters) {
-        if (h.type !== "spawner") continue;
+        if (h.type !== "spawner" && h.type !== "airSpawner") continue;
         if (state.elapsed >= h.spawnDelayUntil) continue;
-        const delayTotal = 2;
+        const delayTotal = h.type === "airSpawner" ? 2.1 : 2;
         const elapsedSinceBorn = state.elapsed - h.bornAt;
         const progress = clamp(elapsedSinceBorn / delayTotal, 0, 1);
         const remaining = 1 - progress;
         const clockR = h.r + 28 + remaining * 6;
         const pulse = 1 + Math.sin(state.elapsed * 10) * 0.04;
         const alpha = 0.1 + remaining * 0.18;
+        const ringCol = h.type === "airSpawner" ? "#a78bfa" : "#fb7185";
+        const handCol = h.type === "airSpawner" ? "#7c3aed" : "#f43f5e";
         ctx.save();
         ctx.translate(h.x, h.y);
         ctx.globalAlpha = alpha;
-        ctx.strokeStyle = "#fb7185";
+        ctx.strokeStyle = ringCol;
         ctx.lineWidth = 3;
         ctx.beginPath();
         ctx.arc(0, 0, clockR * pulse, 0, TAU);
         ctx.stroke();
-        ctx.strokeStyle = "#f43f5e";
+        ctx.strokeStyle = handCol;
         ctx.lineWidth = 4;
         ctx.beginPath();
         const a1 = -Math.PI / 2 + progress * TAU * 0.9;
