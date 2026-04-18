@@ -72,6 +72,7 @@
     return points.map((p) => ({ x: p.x - minX, y: p.y - minY }));
   }
   function generateHexTileObstacles(q, r, d) {
+    if (d.emptyTerrain) return [];
     const { BLOCK: BLOCK2, centerX, centerY, hexSize } = d;
     const SQRT3 = Math.sqrt(3);
     const halfW = SQRT3 * hexSize / 2;
@@ -255,9 +256,16 @@
     cardCloseButton,
     cardPickupButton,
     cardSkipButton,
-    cardSwapRow
-  }) {
-    const deathSnapshotsEnabled = (() => {
+    cardSwapRow,
+    rouletteModal = null,
+    rouletteModalTitle = null,
+    rouletteModalSub = null,
+    rouletteModalSpinRow = null,
+    rouletteModalActions = null,
+    /** Dev/test: `<select>` for which special tile (if any) is forced west of spawn; disabled while `gameStarted`. */
+    specialTestWestSelect = null
+  } = {}) {
+    const escapeLocalDevHost = (() => {
       try {
         const h = window.location.hostname;
         return h === "localhost" || h === "127.0.0.1" || h === "[::1]";
@@ -265,9 +273,14 @@
         return false;
       }
     })();
+    const deathSnapshotsEnabled = escapeLocalDevHost;
     if (!deathSnapshotsEnabled) {
       const meta = snapshotFolderButton?.closest(".meta");
       if (meta) meta.hidden = true;
+    }
+    if (!escapeLocalDevHost) {
+      const testPanel = document.getElementById("special-test-west-panel");
+      if (testPanel) testPanel.hidden = true;
     }
     const ctx = canvas.getContext("2d");
     const world = { w: canvas.width, h: canvas.height };
@@ -369,6 +382,21 @@
       { q: -1, r: 1 },
       { q: 0, r: 1 }
     ];
+    const ARENA_NEXUS_SIEGE_SEC = 10;
+    const ARENA_NEXUS_INNER_HEX_SCALE = 0.62;
+    const ARENA_NEXUS_INNER_ENTER_R = HEX_SIZE * ARENA_NEXUS_INNER_HEX_SCALE * (SQRT3 / 2) * 0.96;
+    const ARENA_NEXUS_INNER_APOTHEM = HEX_SIZE * ARENA_NEXUS_INNER_HEX_SCALE * (SQRT3 / 2);
+    const ARENA_NEXUS_RING_LO = HEX_SIZE * 0.66;
+    const ARENA_NEXUS_RING_HI = HEX_SIZE * 0.93;
+    const ARENA_NEXUS_RING_LASER_SPAWN_INTERVAL = 2.85;
+    const ARENA_NEXUS_RING_SNIPER_SPAWN_INTERVAL = 3.45;
+    const ARENA_NEXUS_REWARD_MODAL_DELAY_SEC = 1.35;
+    const SPECIAL_HEX_POOL_WEIGHT = 1 / 15;
+    const PROCEDURAL_SPECIAL_COOLDOWN_TILES = 10;
+    const ROULETTE_INNER_HIT_R = 52;
+    const ROULETTE_INNER_HEX_DRAW_R = 46;
+    const ROULETTE_SPIN_SHUFFLE_SEC = 2.15;
+    const ROULETTE_SPIN_WHITEOUT_SEC = 0.42;
     function hexToWorld(q, r) {
       return {
         x: HEX_SIZE * SQRT3 * (q + r / 2),
@@ -406,7 +434,9 @@
       for (const h of needed) {
         const key = hexKey(h.q, h.r);
         if (!tileCache.has(key)) {
+          tryProceduralRareSpecialHex(h.q, h.r);
           const c = hexToWorld(h.q, h.r);
+          const emptyTerrain = isArenaNexusTile(h.q, h.r) || isRouletteHexTile(h.q, h.r);
           tileCache.set(
             key,
             generateHexTileObstacles(h.q, h.r, {
@@ -416,7 +446,8 @@
               BLOCK,
               centerX: c.x,
               centerY: c.y,
-              hexSize: HEX_SIZE
+              hexSize: HEX_SIZE,
+              emptyTerrain
             })
           );
         }
@@ -429,6 +460,682 @@
       for (const h of needed) {
         obstacles = obstacles.concat(tileCache.get(hexKey(h.q, h.r)));
       }
+    }
+    function readTestSpecialWestSelection() {
+      if (!escapeLocalDevHost) return "na";
+      const raw = String(specialTestWestSelect?.value ?? "na").toLowerCase();
+      if (raw === "arena" || raw === "roulette") return raw;
+      return "na";
+    }
+    function syncSpecialTestWestPanelLock() {
+      if (!escapeLocalDevHost) return;
+      if (!specialTestWestSelect) return;
+      specialTestWestSelect.disabled = !!gameStarted;
+      const panel = document.getElementById("special-test-west-panel");
+      if (panel) panel.classList.toggle("special-test-west-panel--locked", !!gameStarted);
+    }
+    function initSpecialHexTiles(spawnQ, spawnR) {
+      const westQ = spawnQ + HEX_DIRS[3].q;
+      const westR = spawnR + HEX_DIRS[3].r;
+      state.testWestQ = westQ;
+      state.testWestR = westR;
+      const mode = readTestSpecialWestSelection();
+      state.testWestKind = mode === "arena" ? "arena" : mode === "roulette" ? "roulette" : "none";
+      state.proceduralArenaKeys.clear();
+      state.proceduralRouletteKeys.clear();
+      state.proceduralSpecialCooldownTiles = 0;
+      state.arenaSiegeQ = spawnQ;
+      state.arenaSiegeR = spawnR;
+      state.arenaPhase = 0;
+      state.arenaSiegeEndAt = 0;
+      state.arenaNextLaserEnemyAt = 0;
+      state.arenaNextSniperEnemyAt = 0;
+      state.arenaCardRewardAt = 0;
+      state.roulettePhase = 0;
+      state.rouletteWasInHex = false;
+      state.rouletteScreenFlashUntil = 0;
+      state.rouletteForgeComplete = false;
+      state.rouletteInnerExitLatch = false;
+      state.pausedForRoulette = false;
+      state.rouletteStep = null;
+      state.rouletteSourceRef = null;
+      state.rouletteSourceCardSnapshot = null;
+      state.rouletteOptionA = null;
+      state.rouletteOptionB = null;
+      state.rouletteSpinShuffleUntil = 0;
+      state.rouletteSpinRevealAt = 0;
+    }
+    function firstProceduralArenaAxial() {
+      const k = state.proceduralArenaKeys.values().next().value;
+      if (!k) return null;
+      const [q, r] = k.split(",").map(Number);
+      return { q, r };
+    }
+    function arenaNexusWorldCenter() {
+      if (state.arenaPhase === 1) {
+        return hexToWorld(state.arenaSiegeQ, state.arenaSiegeR);
+      }
+      const firstArena = firstProceduralArenaAxial();
+      if (firstArena) return hexToWorld(firstArena.q, firstArena.r);
+      if (escapeLocalDevHost && state.testWestKind === "arena") return hexToWorld(state.testWestQ, state.testWestR);
+      return hexToWorld(0, 0);
+    }
+    function collectArenaNexusAxials() {
+      const out = [];
+      const seen = /* @__PURE__ */ new Set();
+      const add = (q, r) => {
+        const k = hexKey(q, r);
+        if (seen.has(k)) return;
+        seen.add(k);
+        out.push({ q, r });
+      };
+      for (const k of state.proceduralArenaKeys) {
+        const [q, r] = k.split(",").map(Number);
+        add(q, r);
+      }
+      if (escapeLocalDevHost && state.testWestKind === "arena") add(state.testWestQ, state.testWestR);
+      return out;
+    }
+    function collectRouletteHexAxials() {
+      const out = [];
+      const seen = /* @__PURE__ */ new Set();
+      const add = (q, r) => {
+        const k = hexKey(q, r);
+        if (seen.has(k)) return;
+        seen.add(k);
+        out.push({ q, r });
+      };
+      for (const k of state.proceduralRouletteKeys) {
+        const [q, r] = k.split(",").map(Number);
+        add(q, r);
+      }
+      if (escapeLocalDevHost && state.testWestKind === "roulette") add(state.testWestQ, state.testWestR);
+      return out;
+    }
+    function hasAnyRouletteHexSite() {
+      return collectRouletteHexAxials().length > 0;
+    }
+    function isArenaNexusTile(q, r) {
+      if (state.proceduralArenaKeys.has(hexKey(q, r))) return true;
+      if (escapeLocalDevHost && state.testWestKind === "arena" && q === state.testWestQ && r === state.testWestR) return true;
+      return false;
+    }
+    function isRouletteHexTile(q, r) {
+      if (state.proceduralRouletteKeys.has(hexKey(q, r))) return true;
+      if (escapeLocalDevHost && state.testWestKind === "roulette" && q === state.testWestQ && r === state.testWestR) return true;
+      return false;
+    }
+    function tryProceduralRareSpecialHex(q, r) {
+      if (state.proceduralSpecialCooldownTiles > 0) {
+        state.proceduralSpecialCooldownTiles -= 1;
+        return;
+      }
+      if (isArenaNexusTile(q, r) || isRouletteHexTile(q, r)) return;
+      if (Math.random() >= SPECIAL_HEX_POOL_WEIGHT) return;
+      const k = hexKey(q, r);
+      if (Math.random() < 0.5) state.proceduralArenaKeys.add(k);
+      else state.proceduralRouletteKeys.add(k);
+      state.proceduralSpecialCooldownTiles = PROCEDURAL_SPECIAL_COOLDOWN_TILES;
+    }
+    function isWorldPointOnRouletteHexTile(x, y) {
+      const h = worldToHex(x, y);
+      if (!isRouletteHexTile(h.q, h.r)) return false;
+      const c = hexToWorld(h.q, h.r);
+      return Math.hypot(x - c.x, y - c.y) <= HEX_SIZE + 4;
+    }
+    function isWorldPointOnSpecialLootForbiddenHex(x, y) {
+      const h = worldToHex(x, y);
+      return isArenaNexusTile(h.q, h.r) || isRouletteHexTile(h.q, h.r);
+    }
+    function strokePointyHexOutline(ctx2, cx, cy, vertexRadius, strokeStyle, lineWidth, glowBlur) {
+      ctx2.save();
+      ctx2.shadowColor = strokeStyle;
+      ctx2.shadowBlur = glowBlur;
+      ctx2.strokeStyle = strokeStyle;
+      ctx2.lineWidth = lineWidth;
+      ctx2.beginPath();
+      for (let i = 0; i < 6; i++) {
+        const a = -Math.PI / 2 + Math.PI / 3 * i;
+        const x = cx + Math.cos(a) * vertexRadius;
+        const y = cy + Math.sin(a) * vertexRadius;
+        if (i === 0) ctx2.moveTo(x, y);
+        else ctx2.lineTo(x, y);
+      }
+      ctx2.closePath();
+      ctx2.stroke();
+      ctx2.shadowBlur = 0;
+      ctx2.stroke();
+      ctx2.restore();
+    }
+    function cleanupArenaNexusSiegeCombat() {
+      entities.laserBeams = entities.laserBeams.filter((b) => !b.arenaHazard);
+      entities.dangerZones = entities.dangerZones.filter((z) => !z.arenaHazard);
+      entities.hunters = entities.hunters.filter((h) => !h.arenaNexusSpawn);
+    }
+    function randomPointOnArenaNexusRing() {
+      const { x: cx, y: cy } = arenaNexusWorldCenter();
+      const ang = Math.random() * TAU;
+      const t = 0.15 + Math.random() * 0.85;
+      const ringR = ARENA_NEXUS_RING_LO + t * (ARENA_NEXUS_RING_HI - ARENA_NEXUS_RING_LO);
+      return { x: cx + Math.cos(ang) * ringR, y: cy + Math.sin(ang) * ringR };
+    }
+    function spawnArenaNexusRingLaserHunter() {
+      const late = state.elapsed >= LATE_GAME_ELITE_SPAWN_SEC;
+      const type = late && Math.random() < 0.38 ? "laserBlue" : "laser";
+      const p = randomPointOnArenaNexusRing();
+      spawnHunter(type, p.x, p.y, { arenaNexusSpawn: true });
+    }
+    function spawnArenaNexusRingSniperHunter() {
+      const p = randomPointOnArenaNexusRing();
+      spawnHunter("sniper", p.x, p.y, { arenaNexusSpawn: true });
+    }
+    function ejectHuntersFromArenaNexusDuringSiege() {
+      if (state.arenaPhase !== 1) return;
+      const { x: cx, y: cy } = arenaNexusWorldCenter();
+      const edgeR = HEX_SIZE + 14;
+      for (const h of entities.hunters) {
+        if (h.arenaNexusSpawn) continue;
+        if (h.type === "spawner" || h.type === "airSpawner") continue;
+        const hq = worldToHex(h.x, h.y);
+        if (!isArenaNexusTile(hq.q, hq.r)) continue;
+        const dx = h.x - cx;
+        const dy = h.y - cy;
+        const len = Math.hypot(dx, dy) || 1;
+        h.x = cx + dx / len * (edgeR + h.r);
+        h.y = cy + dy / len * (edgeR + h.r);
+      }
+    }
+    function clampArenaNexusDefendersToRing() {
+      if (state.arenaPhase !== 1) return;
+      const c = arenaNexusWorldCenter();
+      for (const h of entities.hunters) {
+        if (!h.arenaNexusSpawn) continue;
+        const dx = h.x - c.x;
+        const dy = h.y - c.y;
+        const d = Math.hypot(dx, dy) || 1;
+        if (d < ARENA_NEXUS_RING_LO) {
+          h.x = c.x + dx / d * ARENA_NEXUS_RING_LO;
+          h.y = c.y + dy / d * ARENA_NEXUS_RING_LO;
+        } else if (d > ARENA_NEXUS_RING_HI) {
+          h.x = c.x + dx / d * ARENA_NEXUS_RING_HI;
+          h.y = c.y + dy / d * ARENA_NEXUS_RING_HI;
+        }
+      }
+    }
+    function arenaNexusSiegeInnerMaxCenterDistPx() {
+      return Math.max(6, ARENA_NEXUS_INNER_APOTHEM - player.r - 0.75);
+    }
+    function clampPlayerToArenaNexusInnerHex() {
+      if (state.arenaPhase !== 1) return;
+      const { x: cx, y: cy } = arenaNexusWorldCenter();
+      const dx = player.x - cx;
+      const dy = player.y - cy;
+      const d = Math.hypot(dx, dy) || 1;
+      const maxD = arenaNexusSiegeInnerMaxCenterDistPx();
+      if (d <= maxD) return;
+      player.x = cx + dx / d * maxD;
+      player.y = cy + dy / d * maxD;
+    }
+    function beginArenaNexusSiege() {
+      const ph = worldToHex(player.x, player.y);
+      state.arenaSiegeQ = ph.q;
+      state.arenaSiegeR = ph.r;
+      state.arenaPhase = 1;
+      state.arenaSiegeEndAt = state.elapsed + ARENA_NEXUS_SIEGE_SEC;
+      state.arenaNextLaserEnemyAt = state.elapsed;
+      state.arenaNextSniperEnemyAt = state.elapsed + 0.12;
+      ejectHuntersFromArenaNexusDuringSiege();
+      clampPlayerToArenaNexusInnerHex();
+    }
+    function finishArenaNexusSiege() {
+      state.arenaPhase = 2;
+      cleanupArenaNexusSiegeCombat();
+      state.arenaCardRewardAt = state.elapsed + ARENA_NEXUS_REWARD_MODAL_DELAY_SEC;
+    }
+    function updateArenaNexus(_dt) {
+      if (!state.running || state.pausedForRoulette) return;
+      if (state.arenaPhase === 2 && state.arenaCardRewardAt > 0 && state.elapsed >= state.arenaCardRewardAt && !state.pausedForCard) {
+        state.arenaCardRewardAt = 0;
+        openCardPickupModal(makeJokerArenaRewardCard());
+      }
+      if (state.pausedForCard) return;
+      if (state.arenaPhase === 1) {
+        while (state.elapsed >= state.arenaNextLaserEnemyAt) {
+          spawnArenaNexusRingLaserHunter();
+          state.arenaNextLaserEnemyAt += ARENA_NEXUS_RING_LASER_SPAWN_INTERVAL;
+        }
+        while (state.elapsed >= state.arenaNextSniperEnemyAt) {
+          spawnArenaNexusRingSniperHunter();
+          state.arenaNextSniperEnemyAt += ARENA_NEXUS_RING_SNIPER_SPAWN_INTERVAL;
+        }
+        if (state.elapsed >= state.arenaSiegeEndAt) finishArenaNexusSiege();
+      }
+      if (state.arenaPhase !== 0) return;
+      const ph = worldToHex(player.x, player.y);
+      if (!isArenaNexusTile(ph.q, ph.r)) return;
+      const c = hexToWorld(ph.q, ph.r);
+      const dist = Math.hypot(player.x - c.x, player.y - c.y);
+      if (dist <= ARENA_NEXUS_INNER_ENTER_R) beginArenaNexusSiege();
+    }
+    function drawArenaNexusWorld(ctx2) {
+      const cells = collectArenaNexusAxials();
+      if (!cells.length) return;
+      let outerColor = "rgba(59, 130, 246, 0.92)";
+      let innerColor = "rgba(96, 165, 250, 0.88)";
+      if (state.arenaPhase === 1) {
+        outerColor = "rgba(239, 68, 68, 0.95)";
+        innerColor = "rgba(248, 113, 113, 0.9)";
+      } else if (state.arenaPhase === 2) {
+        outerColor = "rgba(34, 197, 94, 0.92)";
+        innerColor = "rgba(74, 222, 128, 0.88)";
+      }
+      for (const { q, r } of cells) {
+        const c = hexToWorld(q, r);
+        const cx = c.x;
+        const cy = c.y;
+        strokePointyHexOutline(ctx2, cx, cy, HEX_SIZE, outerColor, 3.2, 18);
+        strokePointyHexOutline(ctx2, cx, cy, HEX_SIZE * ARENA_NEXUS_INNER_HEX_SCALE, innerColor, 2.4, 14);
+        if (state.arenaPhase === 1 && q === state.arenaSiegeQ && r === state.arenaSiegeR) {
+          const rem = Math.max(0, state.arenaSiegeEndAt - state.elapsed);
+          const u = rem / ARENA_NEXUS_SIEGE_SEC;
+          const arcR = HEX_SIZE * ARENA_NEXUS_INNER_HEX_SCALE * 0.78;
+          ctx2.save();
+          ctx2.strokeStyle = "rgba(248, 250, 252, 0.95)";
+          ctx2.lineWidth = 4;
+          ctx2.lineCap = "round";
+          ctx2.beginPath();
+          ctx2.arc(cx, cy, arcR, -Math.PI / 2, -Math.PI / 2 + TAU * u);
+          ctx2.stroke();
+          ctx2.fillStyle = "rgba(248, 250, 252, 0.85)";
+          ctx2.font = "600 13px system-ui, sans-serif";
+          ctx2.textAlign = "center";
+          ctx2.textBaseline = "middle";
+          ctx2.fillText(rem <= 0 ? "0" : rem.toFixed(1) + "s", cx, cy);
+          ctx2.restore();
+        }
+      }
+    }
+    function ejectHuntersFromRouletteHexLock() {
+      if (state.roulettePhase !== 1) return;
+      const edgeR = HEX_SIZE + 14;
+      for (const h of entities.hunters) {
+        if (h.arenaNexusSpawn) continue;
+        if (h.type === "spawner" || h.type === "airSpawner") continue;
+        const hq = worldToHex(h.x, h.y);
+        if (!isRouletteHexTile(hq.q, hq.r)) continue;
+        const { x: cx, y: cy } = hexToWorld(hq.q, hq.r);
+        const dx = h.x - cx;
+        const dy = h.y - cy;
+        const len = Math.hypot(dx, dy) || 1;
+        h.x = cx + dx / len * (edgeR + h.r);
+        h.y = cy + dy / len * (edgeR + h.r);
+      }
+    }
+    function ejectHuntersFromLockedSpecialHexes() {
+      ejectHuntersFromArenaNexusDuringSiege();
+      ejectHuntersFromRouletteHexLock();
+    }
+    function triggerRouletteHexOuterCrossing() {
+      state.roulettePhase = 1;
+      state.rouletteScreenFlashUntil = state.elapsed + 0.4;
+      triggerUltScreenShake(14, 0.22);
+      damagePlayer(2, { rouletteHexOuterPenalty: true });
+      ejectHuntersFromRouletteHexLock();
+    }
+    function fillPointyHexRainbowGlow(ctx2, cx, cy, vertexRadius) {
+      ctx2.save();
+      ctx2.beginPath();
+      for (let i = 0; i < 6; i++) {
+        const a = -Math.PI / 2 + Math.PI / 3 * i;
+        const x = cx + Math.cos(a) * vertexRadius;
+        const y = cy + Math.sin(a) * vertexRadius;
+        if (i === 0) ctx2.moveTo(x, y);
+        else ctx2.lineTo(x, y);
+      }
+      ctx2.closePath();
+      const spin = state.elapsed * 2.8;
+      if (typeof ctx2.createConicGradient === "function") {
+        const g = ctx2.createConicGradient(spin, cx, cy);
+        for (let k = 0; k <= 7; k++) g.addColorStop(k / 7, `hsl(${k / 7 * 360} 92% 58%)`);
+        ctx2.fillStyle = g;
+      } else {
+        ctx2.fillStyle = `hsla(${state.elapsed * 110 % 360}, 92%, 58%, 0.55)`;
+      }
+      ctx2.globalAlpha = 0.52;
+      ctx2.fill();
+      ctx2.globalAlpha = 1;
+      ctx2.strokeStyle = "rgba(255,255,255,0.35)";
+      ctx2.lineWidth = 1.5;
+      ctx2.stroke();
+      ctx2.restore();
+    }
+    function drawRouletteHexWorld(ctx2) {
+      const cells = collectRouletteHexAxials();
+      if (!cells.length) return;
+      let outerColor = "rgba(59, 130, 250, 0.92)";
+      if (state.roulettePhase === 1) outerColor = "rgba(239, 68, 68, 0.95)";
+      else if (state.roulettePhase === 2) outerColor = "rgba(34, 197, 94, 0.92)";
+      for (const { q, r } of cells) {
+        const c = hexToWorld(q, r);
+        const cx = c.x;
+        const cy = c.y;
+        strokePointyHexOutline(ctx2, cx, cy, HEX_SIZE, outerColor, 3.2, 18);
+        fillPointyHexRainbowGlow(ctx2, cx, cy, ROULETTE_INNER_HEX_DRAW_R);
+      }
+    }
+    function getReservedDeckKeysExcludingCard(exCard) {
+      const reserved = getReservedDeckKeys();
+      if (exCard && exCard.suit && exCard.suit !== "joker" && Number.isInteger(exCard.rank)) {
+        reserved.delete(deckKey(exCard.suit, exCard.rank));
+      }
+      return reserved;
+    }
+    function makeRouletteCandidateCard(suit, rank) {
+      return {
+        id: `roulette-${Date.now()}-${Math.floor(Math.random() * 1e6)}`,
+        suit,
+        rank,
+        effect: makeCardEffect(suit, rank)
+      };
+    }
+    function buildRoulettePairFromSource(sourceCard) {
+      if (!sourceCard || sourceCard.suit === "joker" || !Number.isInteger(sourceCard.rank)) return null;
+      const rank = sourceCard.rank;
+      const reserved = getReservedDeckKeysExcludingCard(sourceCard);
+      const suits = ["diamonds", "hearts", "clubs", "spades"].filter((s) => s !== sourceCard.suit);
+      const avail = suits.filter((s) => !reserved.has(deckKey(s, rank)));
+      for (let i = avail.length - 1; i > 0; i--) {
+        const j = Math.floor(Math.random() * (i + 1));
+        [avail[i], avail[j]] = [avail[j], avail[i]];
+      }
+      if (avail.length < 2) return null;
+      return { a: makeRouletteCandidateCard(avail[0], rank), b: makeRouletteCandidateCard(avail[1], rank) };
+    }
+    function unpinPlayerDeckPanelForRouletteModal() {
+      const el = document.getElementById("player-deck-panel");
+      if (!el || el.dataset.rouletteDeckPinned !== "1") return;
+      delete el.dataset.rouletteDeckPinned;
+      el.style.position = "";
+      el.style.top = "";
+      el.style.left = "";
+      el.style.width = "";
+      el.style.zIndex = "";
+      el.style.boxSizing = "";
+    }
+    function pinPlayerDeckPanelForRouletteModal() {
+      const el = document.getElementById("player-deck-panel");
+      if (!el) return;
+      const r = el.getBoundingClientRect();
+      el.dataset.rouletteDeckPinned = "1";
+      el.style.boxSizing = "border-box";
+      el.style.position = "fixed";
+      el.style.top = `${Math.max(0, r.top)}px`;
+      el.style.left = `${r.left}px`;
+      el.style.width = `${r.width}px`;
+      el.style.zIndex = "55";
+    }
+    function closeRouletteForgeUi() {
+      if (rouletteModal) rouletteModal.hidden = true;
+      unpinPlayerDeckPanelForRouletteModal();
+      state.pausedForRoulette = false;
+      state.inventoryModalOpen = false;
+      state.rouletteStep = null;
+      state.rouletteSourceRef = null;
+      state.rouletteSourceCardSnapshot = null;
+      state.rouletteOptionA = null;
+      state.rouletteOptionB = null;
+      state.rouletteSpinShuffleUntil = 0;
+      state.rouletteSpinRevealAt = 0;
+      if (rouletteModalSpinRow) rouletteModalSpinRow.innerHTML = "";
+      if (rouletteModalActions) rouletteModalActions.innerHTML = "";
+      state.keys.clear();
+    }
+    function finishRouletteForgeSuccess(chosen) {
+      const ref = state.rouletteSourceRef;
+      if (!ref || !chosen) {
+        closeRouletteForgeUi();
+        return;
+      }
+      const placed = { ...chosen, id: `${Date.now()}-${Math.floor(Math.random() * 1e6)}` };
+      if (ref.kind === "deck") inventory.deckByRank[ref.rank] = placed;
+      else if (ref.kind === "bp") inventory.backpackSlots[ref.idx] = placed;
+      state.rouletteForgeComplete = true;
+      state.roulettePhase = 2;
+      closeRouletteForgeUi();
+      recalcCardPassives();
+    }
+    function setRouletteSpinCardFace(cardEl, card) {
+      if (!cardEl) return;
+      let name = cardEl.querySelector(".roulette-spin-name");
+      let meta = cardEl.querySelector(".roulette-spin-meta");
+      if (!name) {
+        name = document.createElement("span");
+        name.className = "roulette-spin-name";
+        cardEl.appendChild(name);
+      }
+      if (!meta) {
+        meta = document.createElement("span");
+        meta.className = "roulette-spin-meta";
+        cardEl.appendChild(meta);
+      }
+      name.textContent = formatCardName(card);
+      meta.textContent = describeCardEffect(card);
+    }
+    function createRouletteSpinDom() {
+      if (!rouletteModalSpinRow || !state.rouletteOptionA || !state.rouletteOptionB) return;
+      rouletteModalSpinRow.innerHTML = `
+    <div class="roulette-spin-pair roulette-spin-pair--shuffling" id="roulette-spin-pair-root">
+      <div class="roulette-spin-card roulette-spin-card--shuffling" id="roulette-spin-left"></div>
+      <div class="roulette-spin-card roulette-spin-card--shuffling" id="roulette-spin-right"></div>
+    </div>`;
+      const left = document.getElementById("roulette-spin-left");
+      const right = document.getElementById("roulette-spin-right");
+      if (left) setRouletteSpinCardFace(left, state.rouletteOptionA);
+      if (right) setRouletteSpinCardFace(right, state.rouletteOptionB);
+    }
+    function syncRouletteSpinShuffleVisual() {
+      if (!rouletteModalSpinRow || !state.rouletteOptionA || !state.rouletteOptionB) return;
+      const pair = document.getElementById("roulette-spin-pair-root");
+      const left = document.getElementById("roulette-spin-left");
+      const right = document.getElementById("roulette-spin-right");
+      if (!pair || !left || !right) return;
+      const t = state.elapsed;
+      const a = state.rouletteOptionA;
+      const b = state.rouletteOptionB;
+      const swap = Math.floor(t * 3.1 + Math.sin(t * 5.2) * 1.4) % 2 === 1;
+      const leftCard = swap ? b : a;
+      const rightCard = swap ? a : b;
+      setRouletteSpinCardFace(left, leftCard);
+      setRouletteSpinCardFace(right, rightCard);
+      const micro = Math.sin(t * 12) + Math.sin(t * 7.1);
+      const hi = Math.floor((t * 4.6 + micro * 0.9) % 2);
+      const bothDim = Math.floor(t * 5.5) % 13 === 0;
+      let leftCls = "roulette-spin-card roulette-spin-card--shuffling";
+      let rightCls = "roulette-spin-card roulette-spin-card--shuffling";
+      if (bothDim) {
+        leftCls += " roulette-spin-card--dim";
+        rightCls += " roulette-spin-card--dim";
+      } else if (hi === 0) {
+        leftCls += " roulette-spin-card--hot";
+      } else {
+        rightCls += " roulette-spin-card--hot";
+      }
+      left.className = leftCls;
+      right.className = rightCls;
+      pair.classList.add("roulette-spin-pair--shuffling");
+      pair.classList.remove("roulette-spin-pair--whiteout");
+    }
+    function syncRouletteSpinWhiteoutVisual() {
+      const pair = document.getElementById("roulette-spin-pair-root");
+      const left = document.getElementById("roulette-spin-left");
+      const right = document.getElementById("roulette-spin-right");
+      if (pair) {
+        pair.classList.remove("roulette-spin-pair--shuffling");
+        pair.classList.add("roulette-spin-pair--whiteout");
+      }
+      if (left) left.className = "roulette-spin-card roulette-spin-card--whiteout-panel";
+      if (right) right.className = "roulette-spin-card roulette-spin-card--whiteout-panel";
+    }
+    function renderRouletteSpinSettled() {
+      const pair = document.getElementById("roulette-spin-pair-root");
+      const left = document.getElementById("roulette-spin-left");
+      const right = document.getElementById("roulette-spin-right");
+      if (!pair || !left || !right || !state.rouletteOptionA || !state.rouletteOptionB) return;
+      const a = state.rouletteOptionA;
+      const b = state.rouletteOptionB;
+      pair.classList.remove("roulette-spin-pair--shuffling", "roulette-spin-pair--whiteout");
+      setRouletteSpinCardFace(left, a);
+      setRouletteSpinCardFace(right, b);
+      left.className = "roulette-spin-card roulette-spin-card--revealed roulette-spin-card--pickable";
+      right.className = "roulette-spin-card roulette-spin-card--revealed roulette-spin-card--pickable";
+    }
+    function wireRouletteCardPickListeners() {
+      const left = document.getElementById("roulette-spin-left");
+      const right = document.getElementById("roulette-spin-right");
+      if (!left || !right || !state.rouletteOptionA || !state.rouletteOptionB) return;
+      left.tabIndex = 0;
+      right.tabIndex = 0;
+      left.onclick = () => finishRouletteForgeSuccess(state.rouletteOptionA);
+      right.onclick = () => finishRouletteForgeSuccess(state.rouletteOptionB);
+      const onKey = (ev, pickA) => {
+        if (ev.key !== "Enter" && ev.key !== " ") return;
+        ev.preventDefault();
+        finishRouletteForgeSuccess(pickA ? state.rouletteOptionA : state.rouletteOptionB);
+      };
+      left.onkeydown = (ev) => onKey(ev, true);
+      right.onkeydown = (ev) => onKey(ev, false);
+    }
+    function renderRoulettePickWinnerButtons() {
+      if (!rouletteModalActions || !state.rouletteOptionA || !state.rouletteOptionB) return;
+      rouletteModalActions.innerHTML = "";
+      const cancel = document.createElement("button");
+      cancel.type = "button";
+      cancel.className = "leave-button";
+      cancel.textContent = "Cancel";
+      cancel.addEventListener("click", () => closeRouletteForgeUi());
+      rouletteModalActions.appendChild(cancel);
+    }
+    function startRouletteSpinFromSourceCard(sourceCard, ref) {
+      const pair = buildRoulettePairFromSource(sourceCard);
+      if (!pair) {
+        if (rouletteModalSub) {
+          rouletteModalSub.textContent = "That card has no two free suits at this rank (other ranks may still work). Pick another or cancel.";
+        }
+        return;
+      }
+      state.rouletteSourceRef = ref;
+      state.rouletteSourceCardSnapshot = sourceCard;
+      state.rouletteOptionA = pair.a;
+      state.rouletteOptionB = pair.b;
+      state.rouletteStep = "spin";
+      if (rouletteModalSpinRow) rouletteModalSpinRow.innerHTML = "";
+      if (rouletteModalActions) rouletteModalActions.innerHTML = "";
+      createRouletteSpinDom();
+      state.rouletteSpinShuffleUntil = state.elapsed + ROULETTE_SPIN_SHUFFLE_SEC;
+      state.rouletteSpinRevealAt = state.rouletteSpinShuffleUntil + ROULETTE_SPIN_WHITEOUT_SEC;
+      if (rouletteModalSub) rouletteModalSub.textContent = "Shuffling";
+    }
+    function renderRouletteSourcePicker() {
+      if (!rouletteModalSpinRow || !rouletteModalActions) return;
+      rouletteModalSpinRow.innerHTML = "";
+      rouletteModalActions.innerHTML = "";
+      let pickCount = 0;
+      for (let r = 1; r <= 13; r++) {
+        const c = inventory.deckByRank[r];
+        if (!c || c.suit === "joker") continue;
+        if (!buildRoulettePairFromSource(c)) continue;
+        const b = document.createElement("button");
+        b.type = "button";
+        b.className = "leave-button";
+        b.textContent = `Deck ${cardRankText(r)} \u2014 ${formatCardName(c)}`;
+        b.addEventListener("click", () => startRouletteSpinFromSourceCard(c, { kind: "deck", rank: r }));
+        rouletteModalActions.appendChild(b);
+        pickCount += 1;
+      }
+      for (let i = 0; i < 3; i++) {
+        const c = inventory.backpackSlots[i];
+        if (!c || c.suit === "joker") continue;
+        if (!buildRoulettePairFromSource(c)) continue;
+        const b = document.createElement("button");
+        b.type = "button";
+        b.className = "leave-button";
+        b.textContent = `Backpack ${i + 1} \u2014 ${formatCardName(c)}`;
+        b.addEventListener("click", () => startRouletteSpinFromSourceCard(c, { kind: "bp", idx: i }));
+        rouletteModalActions.appendChild(b);
+        pickCount += 1;
+      }
+      if (pickCount === 0) {
+        if (rouletteModalSub) {
+          rouletteModalSub.textContent = "No card can forge right now \u2014 you need a non-joker in deck or backpack whose rank still has two suits not already in your deck.";
+        }
+        const hint = document.createElement("p");
+        hint.className = "roulette-empty-hint";
+        hint.textContent = "Leave the inner hex and return with a different loadout, or press Escape to close.";
+        rouletteModalSpinRow.appendChild(hint);
+      }
+      const cancel = document.createElement("button");
+      cancel.type = "button";
+      cancel.className = "leave-button";
+      cancel.textContent = "Cancel";
+      cancel.addEventListener("click", () => closeRouletteForgeUi());
+      rouletteModalActions.appendChild(cancel);
+    }
+    function openRouletteForgeModal() {
+      if (!rouletteModal || state.rouletteForgeComplete) return;
+      state.pausedForRoulette = true;
+      state.inventoryModalOpen = true;
+      state.rouletteStep = "pickSource";
+      state.keys.clear();
+      rouletteModal.hidden = false;
+      if (rouletteModalTitle) rouletteModalTitle.textContent = "Roulette forge";
+      if (rouletteModalSub) rouletteModalSub.textContent = "Pick a card to re-roll into two other suits at the same rank.";
+      renderRouletteSourcePicker();
+      requestAnimationFrame(() => {
+        requestAnimationFrame(() => pinPlayerDeckPanelForRouletteModal());
+      });
+    }
+    function updateRouletteUi(_dt) {
+      if (state.rouletteStep !== "spin" || !state.rouletteOptionA || !state.rouletteOptionB) return;
+      const elapsed = state.elapsed;
+      if (elapsed >= state.rouletteSpinRevealAt) {
+        state.rouletteStep = "pick";
+        renderRouletteSpinSettled();
+        if (rouletteModalSub) rouletteModalSub.textContent = "Click a card to keep (the other is lost).";
+        renderRoulettePickWinnerButtons();
+        wireRouletteCardPickListeners();
+        return;
+      }
+      if (elapsed >= state.rouletteSpinShuffleUntil) {
+        if (rouletteModalSub) rouletteModalSub.textContent = "Revealing\u2026";
+        syncRouletteSpinWhiteoutVisual();
+        return;
+      }
+      syncRouletteSpinShuffleVisual();
+    }
+    function updateRouletteHex(_dt) {
+      if (!state.running || state.pausedForCard || state.pausedForRoulette) return;
+      const ph = worldToHex(player.x, player.y);
+      const inHex = isRouletteHexTile(ph.q, ph.r);
+      if (!inHex) {
+        state.rouletteWasInHex = false;
+        state.roulettePhase = 0;
+        state.rouletteForgeComplete = false;
+        state.rouletteInnerExitLatch = false;
+        return;
+      }
+      const rc = hexToWorld(ph.q, ph.r);
+      const dist = Math.hypot(player.x - rc.x, player.y - rc.y);
+      const inInner = dist <= ROULETTE_INNER_HIT_R;
+      const enteredHexThisFrame = inHex && !state.rouletteWasInHex;
+      if (enteredHexThisFrame && state.roulettePhase === 0) {
+        triggerRouletteHexOuterCrossing();
+      }
+      state.rouletteWasInHex = true;
+      if (state.roulettePhase === 1 && inInner && !state.rouletteForgeComplete && !state.rouletteInnerExitLatch) {
+        state.rouletteInnerExitLatch = true;
+        openRouletteForgeModal();
+      }
+      if (!inInner) state.rouletteInnerExitLatch = false;
     }
     const player = {
       x: 96,
@@ -505,7 +1212,42 @@
       rogueFoodSenseUntil: 0,
       rogueNextFoodAt: 0,
       rogueNextHungryPopupAt: 0,
-      rogueLastKnownPlayerPos: { x: 96, y: 340 }
+      rogueLastKnownPlayerPos: { x: 96, y: 340 },
+      /** Procedural arena hexes (`hexKey` → Set); unbounded count, 1/15 + cooldown between new spawns. */
+      proceduralArenaKeys: /* @__PURE__ */ new Set(),
+      proceduralRouletteKeys: /* @__PURE__ */ new Set(),
+      /** Newly generated tiles to skip before the next 1/15 special roll (after a spawn, starts at 10). */
+      proceduralSpecialCooldownTiles: 0,
+      /** 0 = idle (blue), 1 = siege (red), 2 = cleared (green). */
+      arenaPhase: 0,
+      arenaSiegeEndAt: 0,
+      arenaNextLaserEnemyAt: 0,
+      arenaNextSniperEnemyAt: 0,
+      /** After siege: `elapsed` when to open the Joker reward modal; 0 = not scheduled / already offered. */
+      arenaCardRewardAt: 0,
+      /** Axial cell where the current arena siege is anchored (set when siege begins). */
+      arenaSiegeQ: 0,
+      arenaSiegeR: 0,
+      /** Local-dev west neighbor for `#special-test-west-select` (additive with procedural specials). */
+      testWestQ: 0,
+      testWestR: 0,
+      /** @type {"none"|"arena"|"roulette"} */
+      testWestKind: "none",
+      /** 0 idle blue, 1 locked after outer penalty, 2 cleared after forge. */
+      roulettePhase: 0,
+      rouletteWasInHex: false,
+      rouletteScreenFlashUntil: 0,
+      rouletteForgeComplete: false,
+      rouletteInnerExitLatch: false,
+      pausedForRoulette: false,
+      rouletteStep: null,
+      /** @type {{ kind: 'deck'; rank: number } | { kind: 'bp'; idx: number } | null} */
+      rouletteSourceRef: null,
+      rouletteSourceCardSnapshot: null,
+      rouletteOptionA: null,
+      rouletteOptionB: null,
+      rouletteSpinShuffleUntil: 0,
+      rouletteSpinRevealAt: 0
     };
     let snapshotDirectoryHandle = null;
     let selectedCharacter = CHARACTERS.knight;
@@ -582,7 +1324,7 @@
       maxCharges: 1,
       nextRechargeAt: 0
     };
-    const suitGlyph = { diamonds: "\u2666", hearts: "\u2665", clubs: "\u2663", spades: "\u2660" };
+    const suitGlyph = { diamonds: "\u2666", hearts: "\u2665", clubs: "\u2663", spades: "\u2660", joker: "\u2605" };
     let gameStarted = false;
     let afterDeathRetry = () => {
     };
@@ -609,7 +1351,12 @@
       return CARD_RANK_SPAWN_WEIGHT_MIN;
     }
     function addReservedDeckKey(card, reserved) {
-      if (card?.suit != null && Number.isInteger(card.rank)) reserved.add(deckKey(card.suit, card.rank));
+      if (card?.suit != null && Number.isInteger(card.rank)) {
+        reserved.add(deckKey(card.suit, card.rank));
+        if (card.suit === "joker") {
+          for (const s of ["diamonds", "hearts", "clubs", "spades"]) reserved.add(deckKey(s, card.rank));
+        }
+      }
     }
     function getReservedDeckKeys() {
       const reserved = /* @__PURE__ */ new Set();
@@ -718,24 +1465,42 @@
         effect: makeCardEffect(suit, rank)
       };
     }
+    function makeJokerArenaRewardCard() {
+      const ranks = [10, 11, 12, 13];
+      const rank = ranks[Math.floor(Math.random() * ranks.length)];
+      const sourceSuits = ["diamonds", "hearts", "clubs", "spades"];
+      const effectBorrowedSuit = sourceSuits[Math.floor(Math.random() * sourceSuits.length)];
+      return {
+        id: `joker-arena-${Date.now()}-${Math.floor(Math.random() * 1e6)}`,
+        suit: "joker",
+        rank,
+        effectBorrowedSuit,
+        effect: makeCardEffect(effectBorrowedSuit, rank)
+      };
+    }
     function describeCardEffect(card) {
       const e = card.effect;
+      let base;
       if (e.kind === "ultimate") {
         const names = { shield: "Orbiting shields", burst: "Push waves", timelock: "Timelock", heal: "Vitality (temp HP)" };
-        return `Ultimate \u2014 ${names[e.ultType] ?? e.ultType}`;
+        base = `Ultimate \u2014 ${names[e.ultType] ?? e.ultType}`;
+      } else if (e.kind === "cooldown") base = `-${e.value.toFixed(1)}s ${abilityLabelById(e.target)} cooldown`;
+      else if (e.kind === "cooldownPct") base = `-${Math.round(e.value * 100)}% ${abilityLabelById(e.target)} cooldown`;
+      else if (e.kind === "maxHp") base = `+${e.value} max HP`;
+      else if (e.kind === "hitResist") base = `Block one hit every ${e.cooldown.toFixed(1)}s`;
+      else if (e.kind === "frontShield") base = `Front shield arc +${Math.round(e.arc)}deg`;
+      else if (e.kind === "dodge") base = `${Math.round(e.value * 1e3) / 10}% dodge while dash is cooling down`;
+      else if (e.kind === "stun") base = `Stun nearby enemies ${e.value.toFixed(1)}s on hit`;
+      else if (e.kind === "invisBurst") base = `Burst grants ${e.value.toFixed(1)}s invisibility`;
+      else if (e.kind === "speed") base = `+${Math.round(e.value * 100)}% passive speed`;
+      else if (e.kind === "terrainBoost") base = `+${Math.round(e.value * 100)}% terrain-touch speed boost`;
+      else if (e.kind === "dashCharge") base = `+${e.value} dash charge`;
+      else base = "Passive effect";
+      if (card?.suit === "joker") {
+        const g = suitGlyph[card.effectBorrowedSuit] ?? "?";
+        return `${base} (Joker \u2014 Contributes towards all set bonuses).`;
       }
-      if (e.kind === "cooldown") return `-${e.value.toFixed(1)}s ${abilityLabelById(e.target)} cooldown`;
-      if (e.kind === "cooldownPct") return `-${Math.round(e.value * 100)}% ${abilityLabelById(e.target)} cooldown`;
-      if (e.kind === "maxHp") return `+${e.value} max HP`;
-      if (e.kind === "hitResist") return `Block one hit every ${e.cooldown.toFixed(1)}s`;
-      if (e.kind === "frontShield") return `Front shield arc +${Math.round(e.arc)}deg`;
-      if (e.kind === "dodge") return `${Math.round(e.value * 1e3) / 10}% dodge while dash is cooling down`;
-      if (e.kind === "stun") return `Stun nearby enemies ${e.value.toFixed(1)}s on hit`;
-      if (e.kind === "invisBurst") return `Burst grants ${e.value.toFixed(1)}s invisibility`;
-      if (e.kind === "speed") return `+${Math.round(e.value * 100)}% passive speed`;
-      if (e.kind === "terrainBoost") return `+${Math.round(e.value * 100)}% terrain-touch speed boost`;
-      if (e.kind === "dashCharge") return `+${e.value} dash charge`;
-      return "Passive effect";
+      return base;
     }
     function fillDeckSlotEl(el, rank, card) {
       if (!el) return;
@@ -814,7 +1579,13 @@
       let maxHpBonus = 0;
       const suits = { diamonds: 0, hearts: 0, clubs: 0, spades: 0 };
       forEachDeckCard((card) => {
-        suits[card.suit] += 1;
+        if (!card?.suit) return;
+        if (card.suit === "joker") {
+          suits.diamonds += 1;
+          suits.hearts += 1;
+          suits.clubs += 1;
+          suits.spades += 1;
+        } else if (suits[card.suit] != null) suits[card.suit] += 1;
         const e = card.effect;
         if (e.kind === "cooldown") passive.cooldownFlat[e.target] += e.value;
         else if (e.kind === "cooldownPct") passive.cooldownPct[e.target] += e.value;
@@ -862,7 +1633,13 @@
     function getSetBonusLines() {
       const suits = { diamonds: 0, hearts: 0, clubs: 0, spades: 0 };
       forEachDeckCard((card) => {
-        suits[card.suit] += 1;
+        if (!card?.suit) return;
+        if (card.suit === "joker") {
+          suits.diamonds += 1;
+          suits.hearts += 1;
+          suits.clubs += 1;
+          suits.spades += 1;
+        } else if (suits[card.suit] != null) suits[card.suit] += 1;
       });
       const lines = [];
       if (suits.diamonds >= SET_BONUS_SUIT_THRESHOLD) {
@@ -905,12 +1682,19 @@
       "card-set-glow-red",
       "card-set-glow-yellow",
       "card-set-glow-green",
-      "card-set-glow-blue"
+      "card-set-glow-blue",
+      "card-set-glow-white"
     ];
     function countSuitsAcrossAllStowed() {
       const suits = { diamonds: 0, hearts: 0, clubs: 0, spades: 0 };
       const add = (card) => {
-        if (card && card.suit) suits[card.suit] += 1;
+        if (!card?.suit) return;
+        if (card.suit === "joker") {
+          suits.diamonds += 1;
+          suits.hearts += 1;
+          suits.clubs += 1;
+          suits.spades += 1;
+        } else if (suits[card.suit] != null) suits[card.suit] += 1;
       };
       add(state.pendingCard);
       forEachDeckCard((c) => add(c));
@@ -919,6 +1703,7 @@
     }
     function suitInventoryGlowClass(card) {
       if (!card?.suit) return "";
+      if (card.suit === "joker") return "card-set-glow-white";
       const suits = countSuitsAcrossAllStowed();
       const n = suits[card.suit];
       if (n < 2) return "";
@@ -937,7 +1722,13 @@
     function countSuitsInActiveSlots() {
       const suits = { diamonds: 0, hearts: 0, clubs: 0, spades: 0 };
       forEachDeckCard((card) => {
-        if (card?.suit) suits[card.suit] += 1;
+        if (!card?.suit) return;
+        if (card.suit === "joker") {
+          suits.diamonds += 1;
+          suits.hearts += 1;
+          suits.clubs += 1;
+          suits.spades += 1;
+        } else if (suits[card.suit] != null) suits[card.suit] += 1;
       });
       return suits;
     }
@@ -1466,26 +2257,40 @@
       return true;
     }
     function getLaserEndpoint(x, y, dx, dy, maxLen = 900, opts = {}) {
+      const throughObstacles = !!opts.throughObstacles;
       const len = Math.hypot(dx, dy) || 1;
       const ux = dx / len;
       const uy = dy / len;
-      if (opts.throughObstacles) {
-        return { x: x + ux * maxLen, y: y + uy * maxLen };
-      }
       let lastX = x;
       let lastY = y;
       for (let d = 8; d <= maxLen; d += 8) {
         const px = x + ux * d;
         const py = y + uy * d;
-        for (const obstacle of obstacles) {
-          if (px >= obstacle.x && px <= obstacle.x + obstacle.w && py >= obstacle.y && py <= obstacle.y + obstacle.h) {
-            return { x: lastX, y: lastY };
+        if (hasAnyRouletteHexSite() && isWorldPointOnRouletteHexTile(px, py)) {
+          return { x: lastX, y: lastY };
+        }
+        if (!throughObstacles) {
+          for (const obstacle of obstacles) {
+            if (px >= obstacle.x && px <= obstacle.x + obstacle.w && py >= obstacle.y && py <= obstacle.y + obstacle.h) {
+              return { x: lastX, y: lastY };
+            }
           }
         }
         lastX = px;
         lastY = py;
       }
       return { x: lastX, y: lastY };
+    }
+    function sniperArtillerySuppressedByRoulette(sniperX, sniperY, aimX, aimY) {
+      if (!hasAnyRouletteHexSite()) return false;
+      if (isWorldPointOnRouletteHexTile(aimX, aimY)) return true;
+      for (let s = 0; s <= 28; s++) {
+        const u = s / 28;
+        const sx = sniperX + (aimX - sniperX) * u;
+        const sy = sniperY + (aimY - sniperY) * u;
+        if (isWorldPointOnRouletteHexTile(sx, sy)) return true;
+      }
+      return false;
     }
     function hitDecoyAlongSegment(ax, ay, bx, by, extraRadius = 0) {
       for (let i = entities.decoys.length - 1; i >= 0; i--) {
@@ -1538,10 +2343,15 @@
       if (distSq(candidate, player) <= rr * rr) return false;
       return true;
     }
-    function randomOpenPoint(radius, attempts = 96) {
+    function randomOpenPoint(radius, attempts = 96, opts = {}) {
+      const excludeArenaNexus = !!opts.excludeArenaNexus;
       const dMin = 96 + radius;
       const dMax = Math.min(VIEW_W, VIEW_H) * 0.66;
       const sourceHexes = activeHexes.length ? activeHexes : [{ q: 0, r: 0 }];
+      function lootPointUsable(candidate) {
+        if (excludeArenaNexus && isWorldPointOnSpecialLootForbiddenHex(candidate.x, candidate.y)) return false;
+        return spawnLootPointClear(candidate);
+      }
       for (let i = 0; i < attempts; i++) {
         let candidate;
         if (i % 2 === 0) {
@@ -1561,13 +2371,24 @@
             r: radius
           };
         }
-        if (spawnLootPointClear(candidate)) return candidate;
+        if (lootPointUsable(candidate)) return candidate;
       }
       for (let j = 0; j < 40; j++) {
         const ang = Math.random() * TAU;
         const d = rand(dMin, dMax * 0.92);
         const candidate = { x: player.x + Math.cos(ang) * d, y: player.y + Math.sin(ang) * d, r: radius };
+        if (excludeArenaNexus && isWorldPointOnSpecialLootForbiddenHex(candidate.x, candidate.y)) continue;
         if (!collidesAnyObstacle(candidate)) return candidate;
+      }
+      for (let k = 0; k < 24; k++) {
+        const candidate = { x: player.x + rand(-280, 280), y: player.y + rand(-280, 280), r: radius };
+        if (excludeArenaNexus && isWorldPointOnSpecialLootForbiddenHex(candidate.x, candidate.y)) continue;
+        if (!collidesAnyObstacle(candidate)) return candidate;
+      }
+      for (let f = 0; f < 32; f++) {
+        const p = { x: player.x + rand(-140, 140), y: player.y + rand(-140, 140), r: radius };
+        if (excludeArenaNexus && isWorldPointOnSpecialLootForbiddenHex(p.x, p.y)) continue;
+        return p;
       }
       return { x: player.x + rand(-100, 100), y: player.y + rand(-100, 100), r: radius };
     }
@@ -1625,6 +2446,7 @@
     function startGameWithCharacter(id) {
       selectCharacter(id);
       gameStarted = true;
+      syncSpecialTestWestPanelLock();
       if (characterSelectModal) characterSelectModal.classList.remove("open");
       resetGame();
     }
@@ -1720,6 +2542,7 @@
         afterDeathRetry = () => {
           showPick();
           characterSelectModal.classList.add("open");
+          syncSpecialTestWestPanelLock();
         };
       } else {
         for (const btn of characterSelectOptions) {
@@ -1730,6 +2553,7 @@
         afterDeathRetry = () => {
           resetGame();
           gameStarted = true;
+          syncSpecialTestWestPanelLock();
         };
       }
     }
@@ -1779,6 +2603,7 @@
       state.deathStartedAtMs = 0;
       state.manualPause = false;
       state.pausedForCard = false;
+      state.pausedForRoulette = false;
       state.inventoryModalOpen = false;
       state.waitingForMovementResume = false;
       state.pendingCard = null;
@@ -1799,6 +2624,9 @@
       state.rogueLastKnownPlayerPos = { x: player.x, y: player.y };
       player.x = 96;
       player.y = 340;
+      const spawnAxial = worldToHex(96, 340);
+      initSpecialHexTiles(spawnAxial.q, spawnAxial.r);
+      if (rouletteModal) rouletteModal.hidden = true;
       obstacles = [];
       activePlayerHex = { q: 0, r: 0 };
       activeHexes = [];
@@ -2147,7 +2975,7 @@
       setTimeout(() => URL.revokeObjectURL(url), 1e3);
       setSnapshotStatus(`Death screenshots: downloaded ${shortName}`);
     }
-    function spawnHunter(type, customX, customY) {
+    function spawnHunter(type, customX, customY, opts) {
       let r = 10;
       let life = 8;
       let lastShotAt = state.elapsed + rand(0.3, 1.1);
@@ -2231,6 +3059,10 @@
       h.life = life;
       h.dieAt = state.elapsed + life;
       h.lastShotAt = lastShotAt;
+      if (opts?.arenaNexusSpawn) {
+        h.arenaNexusSpawn = true;
+        h.dieAt = Math.max(h.dieAt, state.elapsed + ARENA_NEXUS_SIEGE_SEC + 2.5);
+      }
       if (customX != null && customY != null) {
         h.x = customX;
         h.y = customY;
@@ -2312,7 +3144,7 @@
       scheduleWaveSpawns();
     }
     function spawnPickup() {
-      const point = randomOpenPoint(HEAL_PICKUP_HIT_R);
+      const point = randomOpenPoint(HEAL_PICKUP_HIT_R, 96, { excludeArenaNexus: true });
       entities.pickups.push({
         x: point.x,
         y: point.y,
@@ -2325,7 +3157,7 @@
       });
     }
     function spawnCardPickup() {
-      const point = randomOpenPoint(16);
+      const point = randomOpenPoint(16, 96, { excludeArenaNexus: true });
       entities.cards.push({
         x: point.x,
         y: point.y,
@@ -2480,10 +3312,11 @@
     function tryDash() {
       const ability = abilities.dash;
       if (!state.running) return;
+      if (state.pausedForRoulette) return;
       if (dashState.charges <= 0) return;
       let spadesCount = 0;
       forEachDeckCard((c) => {
-        if (c.suit === "spades") spadesCount += 1;
+        if (c.suit === "spades" || c.suit === "joker") spadesCount += 1;
       });
       const qualifiesForSpadesDashBonus = selectedCharacter.id === "rogue" && state.rogueStealthActive || state.elapsed < inventory.clubsInvisUntil;
       dashState.charges -= 1;
@@ -2495,6 +3328,7 @@
       if (target.progressed) {
         player.x = target.x;
         player.y = target.y;
+        clampPlayerToArenaNexusInnerHex();
         if (selectedCharacter.id === "rogue" && spadesCount >= SET_BONUS_SUIT_THRESHOLD && qualifiesForSpadesDashBonus) {
           state.rogueStealthActive = true;
           state.rogueStealthOpenUntil = Math.max(
@@ -2538,6 +3372,11 @@
       for (let d = step; d <= dashRange; d += step) {
         const test = { x: player.x + dir.x * d, y: player.y + dir.y * d, r: player.r };
         if (outOfBoundsCircle(test)) break;
+        if (state.arenaPhase === 1) {
+          const { x: acx, y: acy } = arenaNexusWorldCenter();
+          const maxC = arenaNexusSiegeInnerMaxCenterDistPx();
+          if (Math.hypot(test.x - acx, test.y - acy) > maxC + 1e-4) break;
+        }
         if (collidesAnyObstacle(test)) {
           if (selectedCharacter.id === "rogue") break;
           continue;
@@ -2550,7 +3389,7 @@
     }
     function startRogueDashAim() {
       if (selectedCharacter.id !== "rogue") return;
-      if (!state.running || state.pausedForCard || state.inventoryModalOpen) return;
+      if (!state.running || state.pausedForCard || state.pausedForRoulette || state.inventoryModalOpen) return;
       if (dashState.charges <= 0) return;
       state.rogueDashAiming = true;
     }
@@ -2990,8 +3829,25 @@
       for (let i = entities.projectiles.length - 1; i >= 0; i--) {
         const p = entities.projectiles[i];
         const sp = spades13AuraEnemyDtMult(p.x, p.y);
+        const prevX = p.x;
+        const prevY = p.y;
         p.x += p.vx * dt * sp;
         p.y += p.vy * dt * sp;
+        let hitRoulette = false;
+        for (let s = 0; s <= 5; s++) {
+          const u = s / 5;
+          const sx = prevX + (p.x - prevX) * u;
+          const sy = prevY + (p.y - prevY) * u;
+          if (isWorldPointOnRouletteHexTile(sx, sy)) {
+            hitRoulette = true;
+            break;
+          }
+        }
+        if (hitRoulette) {
+          spawnAttackRing(p.x, p.y, p.r + 9, "#94a3b8", 0.1);
+          entities.projectiles.splice(i, 1);
+          continue;
+        }
         const circle = { x: p.x, y: p.y, r: p.r };
         if (state.elapsed - p.bornAt > p.life || outOfBoundsCircle(circle) || collidesAnyObstacle(circle)) {
           entities.projectiles.splice(i, 1);
@@ -3049,23 +3905,26 @@
     }
     function damagePlayer(amount, opts = {}) {
       if (!state.running) return;
-      if (selectedCharacter.id === "rogue" && state.rogueStealthActive) return;
-      if (selectedCharacter.id === "rogue" && state.elapsed < inventory.spadesLandingStealthUntil) return;
-      if (state.elapsed < state.playerInvulnerableUntil) return;
-      if (state.elapsed < state.playerUntargetableUntil) return;
+      const rouletteHexOuter = !!opts.rouletteHexOuterPenalty;
+      if (!rouletteHexOuter) {
+        if (selectedCharacter.id === "rogue" && state.rogueStealthActive) return;
+        if (selectedCharacter.id === "rogue" && state.elapsed < inventory.spadesLandingStealthUntil) return;
+        if (state.elapsed < state.playerInvulnerableUntil) return;
+        if (state.elapsed < state.playerUntargetableUntil) return;
+        if (state.elapsed < inventory.clubsInvisUntil) return;
+        if (cdr(abilities.dash) > 0 && Math.random() < passive.dodgeChanceWhenDashCd) {
+          inventory.dodgeTextUntil = state.elapsed + 0.8;
+          return;
+        }
+        const heartsResistanceCount = getHeartsResistanceCardCount();
+        if (heartsResistanceCount > 0 && state.elapsed >= inventory.heartsResistanceReadyAt) {
+          const cd = getHeartsResistanceCooldown();
+          inventory.heartsResistanceCooldownDuration = cd;
+          inventory.heartsResistanceReadyAt = state.elapsed + cd;
+          return;
+        }
+      }
       if (amount <= 0) return;
-      if (state.elapsed < inventory.clubsInvisUntil) return;
-      if (cdr(abilities.dash) > 0 && Math.random() < passive.dodgeChanceWhenDashCd) {
-        inventory.dodgeTextUntil = state.elapsed + 0.8;
-        return;
-      }
-      const heartsResistanceCount = getHeartsResistanceCardCount();
-      if (heartsResistanceCount > 0 && state.elapsed >= inventory.heartsResistanceReadyAt) {
-        const cd = getHeartsResistanceCooldown();
-        inventory.heartsResistanceCooldownDuration = cd;
-        inventory.heartsResistanceReadyAt = state.elapsed + cd;
-        return;
-      }
       let rem = amount;
       if (state.tempHp > 0) {
         const absorbed = Math.min(rem, state.tempHp);
@@ -3117,7 +3976,7 @@
         if (state.elapsed - h.lastShotAt < 2.1) continue;
         const target = pickTargetForHunter(h);
         if (selectedCharacter.id === "rogue" && target !== player) continue;
-        if (selectedCharacter.id === "rogue" && !anyOtherEnemyHasLineOfSightToPlayer(h)) continue;
+        if (selectedCharacter.id === "rogue" && !h.arenaNexusSpawn && !anyOtherEnemyHasLineOfSightToPlayer(h)) continue;
         h.lastShotAt = state.elapsed;
         spawnAttackRing(h.x, h.y, h.r + 6, "#fb7185", 0.2);
         const windup = SNIPER_ARTILLERY_WINDUP;
@@ -3128,6 +3987,10 @@
         let aimY = target.y + tvy * leadT + rand(-12, 12);
         aimX = clamp(aimX, player.x - VIEW_W * 0.9, player.x + VIEW_W * 0.9);
         aimY = clamp(aimY, player.y - VIEW_H * 0.9, player.y + VIEW_H * 0.9);
+        if (sniperArtillerySuppressedByRoulette(h.x, h.y, aimX, aimY)) {
+          h.lastShotAt = state.elapsed;
+          continue;
+        }
         entities.dangerZones.push({
           x: aimX,
           y: aimY,
@@ -3152,7 +4015,27 @@
       }
       for (let i = entities.bullets.length - 1; i >= 0; i--) {
         const b = entities.bullets[i];
-        if (state.elapsed - b.bornAt > b.life) entities.bullets.splice(i, 1);
+        if (state.elapsed - b.bornAt > b.life) {
+          entities.bullets.splice(i, 1);
+          continue;
+        }
+        const life = clamp((state.elapsed - b.bornAt) / b.life, 0, 1);
+        let hitRoulette = false;
+        for (let s = 0; s <= 16; s++) {
+          const u = s / 16;
+          const sx = b.x + (b.tx - b.x) * u;
+          const sy = b.y + (b.ty - b.y) * u;
+          if (isWorldPointOnRouletteHexTile(sx, sy)) {
+            hitRoulette = true;
+            break;
+          }
+        }
+        if (hitRoulette) {
+          const x = b.x + (b.tx - b.x) * life;
+          const y = b.y + (b.ty - b.y) * life;
+          spawnAttackRing(x, y, 10, "#94a3b8", 0.1);
+          entities.bullets.splice(i, 1);
+        }
       }
       for (let i = entities.dangerZones.length - 1; i >= 0; i--) {
         const zone = entities.dangerZones[i];
@@ -3331,6 +4214,10 @@
       if (state.pausedForCard) return;
       const simDt = dt;
       state.elapsed += simDt;
+      if (state.pausedForRoulette) {
+        updateRouletteUi(simDt);
+        return;
+      }
       updateRogueLineOfSightState();
       const enemiesFrozen = state.elapsed < state.playerHeadstartUntil;
       const timelockWorldFrozen = state.timelockEnemyUntil > state.elapsed && state.elapsed >= state.timelockEnemyFrom;
@@ -3451,25 +4338,30 @@
       if (!phaseThrough && collidesAnyObstacle(player)) {
         ejectPlayerFromObstaclesIfStuck();
       }
+      clampPlayerToArenaNexusInnerHex();
       if (moving && moveRes.touchedObstacle && passive.obstacleTouchMult > 1) {
         inventory.spadesObstacleBoostUntil = state.elapsed + TERRAIN_SPEED_BOOST_LINGER;
       }
       updateRogueNeeds(simDt, moving, moveRes.touchedObstacle);
       if (!state.running) return;
       updatePlayerVelocity(dt);
+      updateArenaNexus(simDt);
+      updateRouletteHex(simDt);
       if (!pauseHostiles) {
         moveHunters(enemySimDt);
         updateSnipers(enemySimDt);
         updateRangedAttackers(enemySimDt);
         updateSpawners(enemySimDt);
       }
+      ejectHuntersFromLockedSpecialHexes();
+      clampArenaNexusDefendersToRing();
       updateSpecialAbilityEffects(enemySimDt);
       if (!pauseHostiles) {
         updateLaserHazards();
         updateCollisions();
       }
       updateCardPickups();
-      if (state.setBonusChoicePendingSuit && state.inventoryModalOpen) showSetBonusChoice();
+      if (state.setBonusChoicePendingSuit && state.inventoryModalOpen && !state.pausedForRoulette) showSetBonusChoice();
     }
     function drawHud() {
       ctx.textAlign = "left";
@@ -3811,6 +4703,18 @@
       ctx.save();
       ctx.translate(-cameraX + shake.x, -cameraY + shake.y);
       drawObstacles(ctx, obstacles);
+      drawArenaNexusWorld(ctx);
+      drawRouletteHexWorld(ctx);
+      if (hasAnyRouletteHexSite() && state.elapsed < state.rouletteScreenFlashUntil) {
+        const u = clamp((state.rouletteScreenFlashUntil - state.elapsed) / 0.4, 0, 1);
+        ctx.fillStyle = `rgba(220, 38, 38, ${0.38 * u})`;
+        for (const { q, r } of collectRouletteHexAxials()) {
+          const c = hexToWorld(q, r);
+          ctx.beginPath();
+          ctx.arc(c.x, c.y, HEX_SIZE * 0.98, 0, TAU);
+          ctx.fill();
+        }
+      }
       for (const smoke of entities.smokeZones) {
         const t = clamp((state.elapsed - smoke.bornAt) / Math.max(1e-3, smoke.expiresAt - smoke.bornAt), 0, 1);
         const alpha = 0.26 * (1 - t * 0.55);
@@ -4277,14 +5181,6 @@
         ctx.beginPath();
         ctx.arc(iconX, iconY, r, -Math.PI / 2 + TAU * t, -Math.PI / 2 + TAU);
         ctx.stroke();
-        ctx.strokeStyle = "rgba(226, 232, 240, 0.8)";
-        ctx.lineWidth = 1;
-        ctx.beginPath();
-        ctx.moveTo(iconX - 2, iconY - 2.5);
-        ctx.lineTo(iconX + 2, iconY - 2.5);
-        ctx.lineTo(iconX - 2, iconY + 2.5);
-        ctx.lineTo(iconX + 2, iconY + 2.5);
-        ctx.stroke();
       }
       for (const ripple of entities.damageRipples) {
         const t = clamp(
@@ -4485,7 +5381,7 @@
       requestAnimationFrame(loop);
     }
     function onAbilityKey(key) {
-      if (state.pausedForCard) return;
+      if (state.pausedForCard || state.pausedForRoulette) return;
       if (key === abilities.dash.key) {
         if (selectedCharacter.id === "rogue") {
           startRogueDashAim();
@@ -4516,7 +5412,12 @@
         }
         state.manualPause = false;
       }
-      if (state.inventoryModalOpen && (key === "enter" || key === " " || key === "escape")) {
+      if (state.pausedForRoulette && key === "escape") {
+        event.preventDefault();
+        closeRouletteForgeUi();
+        return;
+      }
+      if (state.inventoryModalOpen && !state.pausedForRoulette && (key === "enter" || key === " " || key === "escape")) {
         continueAfterLoadout();
         return;
       }
@@ -4555,6 +5456,7 @@
       cardCloseButton.addEventListener("click", () => continueAfterLoadout());
     }
     wireCharacterSelect();
+    syncSpecialTestWestPanelLock();
     refreshControlsHint();
     requestAnimationFrame(loop);
   }
@@ -4579,6 +5481,12 @@
     cardCloseButton: document.getElementById("card-close-button"),
     cardPickupButton: document.getElementById("card-pickup-button"),
     cardSkipButton: document.getElementById("card-skip-button"),
-    cardSwapRow: document.getElementById("card-swap-row")
+    cardSwapRow: document.getElementById("card-swap-row"),
+    rouletteModal: document.getElementById("roulette-modal"),
+    rouletteModalTitle: document.getElementById("roulette-modal-title"),
+    rouletteModalSub: document.getElementById("roulette-modal-sub"),
+    rouletteModalSpinRow: document.getElementById("roulette-modal-spin-row"),
+    rouletteModalActions: document.getElementById("roulette-modal-actions"),
+    specialTestWestSelect: document.getElementById("special-test-west-select")
   });
 })();

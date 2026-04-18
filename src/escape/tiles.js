@@ -142,8 +142,9 @@ export function generateTileObstacles(tileIndex, d) {
   return rects;
 }
 
-/** @param {number} q @param {number} r @param {{ TILE_COLS: number; TILE_ROWS: number; TILE_W: number; BLOCK: number; centerX: number; centerY: number; hexSize: number }} d */
+/** @param {number} q @param {number} r @param {{ TILE_COLS: number; TILE_ROWS: number; TILE_W: number; BLOCK: number; centerX: number; centerY: number; hexSize: number; emptyTerrain?: boolean }} d */
 export function generateHexTileObstacles(q, r, d) {
+  if (d.emptyTerrain) return [];
   const { BLOCK, centerX, centerY, hexSize } = d;
   const SQRT3 = Math.sqrt(3);
   const halfW = (SQRT3 * hexSize) / 2;

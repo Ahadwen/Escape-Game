@@ -20,4 +20,10 @@ mountEscape({
   cardPickupButton: document.getElementById("card-pickup-button"),
   cardSkipButton: document.getElementById("card-skip-button"),
   cardSwapRow: document.getElementById("card-swap-row"),
+  rouletteModal: document.getElementById("roulette-modal"),
+  rouletteModalTitle: document.getElementById("roulette-modal-title"),
+  rouletteModalSub: document.getElementById("roulette-modal-sub"),
+  rouletteModalSpinRow: document.getElementById("roulette-modal-spin-row"),
+  rouletteModalActions: document.getElementById("roulette-modal-actions"),
+  specialTestWestSelect: document.getElementById("special-test-west-select"),
 });
