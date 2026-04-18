@@ -27,29 +27,192 @@
         width: min(96vw, 1180px);
       }
 
-      .card-slots {
+      .player-deck-panel {
         margin: 0 0 10px;
+      }
+
+      .deck-slots-label {
+        font-size: 11px;
+        color: #94a3b8;
+        margin: 0 0 4px;
+        letter-spacing: 0.04em;
+      }
+
+      .player-deck-label-row {
+        display: flex;
+        justify-content: space-between;
+        align-items: baseline;
+        gap: 12px;
+        margin-bottom: 6px;
+      }
+
+      .player-deck-label-row .deck-slots-label {
+        margin-bottom: 0;
+      }
+
+      .deck-slots-label--sub {
+        font-size: 10px;
+        opacity: 0.88;
+        margin-top: 0;
+      }
+
+      /* Ace (left) | ranks 2–13 in 2×6 (center) | backpack stack (right), one row tall */
+      .player-deck-grid {
         display: grid;
-        grid-template-columns: repeat(4, minmax(0, 1fr));
-        gap: 10px;
+        grid-template-columns: clamp(52px, 7.5vw, 78px) minmax(0, 1fr) clamp(64px, 9.5vw, 92px);
+        gap: 8px 10px;
+        align-items: stretch;
+      }
+
+      .deck-slot--ace {
+        display: flex;
+        flex-direction: column;
+        justify-content: center;
+        align-items: center;
+        min-height: 100%;
+        padding: 6px 4px;
+      }
+
+      .deck-slot--ace .deck-rank-label {
+        font-size: 10px;
+      }
+
+      .deck-slot--ace .title {
+        font-size: 15px;
+      }
+
+      .deck-slot--ace .meta {
+        font-size: 10px;
+      }
+
+      .deck-middle-twelve {
+        display: grid;
+        grid-template-columns: repeat(6, minmax(0, 1fr));
+        grid-template-rows: auto auto;
+        gap: 6px;
+        align-content: stretch;
+      }
+
+      .deck-middle-twelve .card-slot.deck-slot {
+        min-height: 52px;
+        padding: 5px 3px;
+      }
+
+      .deck-middle-twelve .card-slot .title {
+        font-size: 12px;
+      }
+
+      .deck-middle-twelve .card-slot .meta {
+        font-size: 9px;
+        margin-top: 2px;
+      }
+
+      .backpack-column {
+        display: flex;
+        flex-direction: column;
+        gap: 6px;
+        min-height: 100%;
+      }
+
+      .card-slot.backpack-slot {
+        flex: 1 1 0;
+        min-height: 0;
+        width: 100%;
+        max-width: none;
+        padding: 4px 3px;
+        border-radius: 8px;
+        font-size: 9px;
+        border-color: #3d4a5f;
+        background: linear-gradient(160deg, #172033, #0c1424);
+      }
+
+      .card-slot.backpack-slot .deck-rank-label {
+        font-size: 8px;
+        margin-bottom: 1px;
+        color: #64748b;
+      }
+
+      .card-slot.backpack-slot .deck-slot-empty {
+        font-size: 9px;
+      }
+
+      .card-slot.backpack-slot .title {
+        font-size: 11px;
+        line-height: 1.15;
+      }
+
+      .card-slot.backpack-slot .meta {
+        margin-top: 2px;
+        font-size: 8px;
+        line-height: 1.25;
       }
 
       .card-slot {
-        min-height: 70px;
+        min-height: 64px;
         border: 1px solid #475569;
         border-radius: 10px;
         background: linear-gradient(160deg, #1e293b, #0f172a);
         color: #cbd5e1;
         display: flex;
+        flex-direction: column;
         align-items: center;
         justify-content: center;
         text-align: center;
-        padding: 8px;
-        font-size: 12px;
+        padding: 6px 4px;
+        font-size: 11px;
+      }
+
+      .deck-rank-label {
+        display: block;
+        font-size: 9px;
+        color: #64748b;
+        font-weight: 700;
+        margin-bottom: 2px;
+      }
+
+      .deck-slot-empty {
+        font-size: 10px;
+        color: #475569;
       }
 
       .card-slot.filled {
         background: linear-gradient(160deg, #1f2937, #111827);
+      }
+
+      .card-slot.card-set-glow-red,
+      .zone-card.card-set-glow-red {
+        border-color: rgba(248, 113, 113, 0.95);
+        box-shadow:
+          0 0 0 1px rgba(127, 29, 29, 0.5),
+          0 0 16px 4px rgba(239, 68, 68, 0.45),
+          inset 0 0 14px rgba(239, 68, 68, 0.12);
+      }
+
+      .card-slot.card-set-glow-yellow,
+      .zone-card.card-set-glow-yellow {
+        border-color: rgba(250, 204, 21, 0.9);
+        box-shadow:
+          0 0 0 1px rgba(113, 63, 18, 0.45),
+          0 0 16px 4px rgba(250, 204, 21, 0.38),
+          inset 0 0 14px rgba(250, 204, 21, 0.1);
+      }
+
+      .card-slot.card-set-glow-green,
+      .zone-card.card-set-glow-green {
+        border-color: rgba(52, 211, 153, 0.95);
+        box-shadow:
+          0 0 0 1px rgba(6, 78, 59, 0.5),
+          0 0 16px 4px rgba(16, 185, 129, 0.42),
+          inset 0 0 14px rgba(16, 185, 129, 0.12);
+      }
+
+      .card-slot.card-set-glow-blue,
+      .zone-card.card-set-glow-blue {
+        border-color: rgba(96, 165, 250, 0.95);
+        box-shadow:
+          0 0 0 1px rgba(30, 58, 138, 0.55),
+          0 0 16px 4px rgba(59, 130, 246, 0.4),
+          inset 0 0 14px rgba(59, 130, 246, 0.12);
       }
 
       .card-slot .title {
@@ -237,7 +400,7 @@
       }
 
       .card-modal-inner {
-        width: min(94vw, 560px);
+        width: min(96vw, 820px);
         border-radius: 14px;
         border: 1px solid #64748b;
         background: linear-gradient(180deg, #111827, #0b1220);
@@ -289,11 +452,143 @@
         font-size: 12px;
       }
 
+      .modal-deck-strip {
+        margin-bottom: 12px;
+      }
+
+      .modal-deck-strip .player-deck-label-row {
+        margin-bottom: 6px;
+      }
+
+      .modal-deck-strip-title {
+        font-size: 12px;
+        color: #94a3b8;
+        margin: 0 0 6px;
+        letter-spacing: 0.03em;
+      }
+
+      /* Match HUD: Ace (left) | ranks 2–13 in 2×6 (center) | backpack (right) */
+      .modal-deck-wings-grid {
+        display: grid;
+        grid-template-columns: clamp(48px, 7vw, 72px) minmax(0, 1fr) clamp(52px, 8.5vw, 80px);
+        gap: 6px 8px;
+        align-items: stretch;
+      }
+
+      .modal-deck-ace-wing {
+        display: flex;
+        flex-direction: column;
+        justify-content: center;
+        min-height: 100%;
+      }
+
+      .modal-deck-middle-twelve {
+        display: grid;
+        grid-template-columns: repeat(6, minmax(0, 1fr));
+        grid-template-rows: auto auto;
+        gap: 4px;
+        align-content: stretch;
+      }
+
+      .modal-deck-backpack-wing {
+        display: flex;
+        flex-direction: column;
+        gap: 4px;
+        min-height: 100%;
+      }
+
+      .modal-deck-cell {
+        border: 1px solid #334155;
+        border-radius: 8px;
+        background: rgba(15, 23, 42, 0.92);
+        padding: 4px 2px 5px;
+        min-height: 46px;
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        justify-content: flex-start;
+        text-align: center;
+      }
+
+      .modal-deck-cell--ace {
+        min-height: 100%;
+        padding: 5px 3px;
+        justify-content: center;
+      }
+
+      .modal-deck-cell--ace .modal-deck-cell-label {
+        font-size: 9px;
+      }
+
+      .modal-deck-cell--ace .modal-deck-cell-card {
+        font-size: 13px;
+      }
+
+      .modal-deck-middle-twelve .modal-deck-cell {
+        min-height: 42px;
+        padding: 3px 2px 4px;
+      }
+
+      .modal-deck-middle-twelve .modal-deck-cell-label {
+        font-size: 8px;
+      }
+
+      .modal-deck-middle-twelve .modal-deck-cell-card {
+        font-size: 10px;
+      }
+
+      .modal-deck-cell--bp {
+        flex: 1 1 0;
+        min-height: 0;
+        border-color: #3d4a5f;
+        background: linear-gradient(160deg, #172033, #0c1424);
+        padding: 3px 2px 4px;
+      }
+
+      .modal-deck-cell--bp .modal-deck-cell-label {
+        font-size: 7px;
+        color: #64748b;
+      }
+
+      .modal-deck-cell--bp .modal-deck-cell-card {
+        font-size: 10px;
+      }
+
+      .modal-deck-cell-label {
+        font-size: 8px;
+        font-weight: 700;
+        color: #64748b;
+        margin-bottom: 2px;
+      }
+
+      .modal-deck-cell-card {
+        font-size: 10px;
+        font-weight: 700;
+        color: #e2e8f0;
+        line-height: 1.2;
+        word-break: break-word;
+      }
+
+      .modal-deck-cell-card.card-set-glow-red,
+      .modal-deck-cell-card.card-set-glow-yellow,
+      .modal-deck-cell-card.card-set-glow-green,
+      .modal-deck-cell-card.card-set-glow-blue {
+        border-radius: 4px;
+        padding: 2px 4px;
+      }
+
+      .modal-deck-cell-empty {
+        font-size: 11px;
+        color: #475569;
+        margin-top: 2px;
+      }
+
       .swap-row {
         margin-top: 12px;
-        display: grid;
-        grid-template-columns: repeat(5, minmax(0, 1fr));
-        gap: 8px;
+        display: flex;
+        flex-wrap: wrap;
+        align-items: flex-end;
+        gap: 10px;
       }
 
       .drop-zone {
@@ -305,6 +600,36 @@
         display: flex;
         flex-direction: column;
         gap: 8px;
+      }
+
+      .drop-zone--swap.drop-zone--main-slot {
+        flex: 1 1 170px;
+        min-width: 140px;
+        max-width: 260px;
+        min-height: 132px;
+      }
+
+      .drop-zone--swap.drop-zone--backpack-sm {
+        flex: 0 0 90px;
+        min-width: 84px;
+        max-width: 96px;
+        min-height: 102px;
+        padding: 6px;
+        gap: 4px;
+      }
+
+      .drop-zone--backpack-sm .zone-label {
+        font-size: 10px;
+      }
+
+      .drop-zone--backpack-sm .zone-card {
+        font-size: 9px;
+        line-height: 1.25;
+        padding: 6px;
+      }
+
+      .drop-zone--backpack-sm .zone-empty {
+        font-size: 10px;
       }
 
       .drop-zone.over {
@@ -347,8 +672,52 @@
         padding: 8px;
       }
 
+      .danger-ramp-wrap {
+        margin: 4px 0 6px;
+      }
+
+      .danger-ramp-head {
+        display: flex;
+        justify-content: space-between;
+        align-items: baseline;
+        gap: 10px;
+        margin-bottom: 4px;
+        font-size: 11px;
+        color: #94a3b8;
+        letter-spacing: 0.04em;
+      }
+
+      .danger-ramp-head strong {
+        color: #fca5a5;
+        font-weight: 700;
+        text-transform: uppercase;
+        font-size: 10px;
+      }
+
+      .danger-ramp-head span {
+        font-variant-numeric: tabular-nums;
+        color: #64748b;
+        font-size: 10px;
+      }
+
+      .danger-ramp-track {
+        height: 9px;
+        border-radius: 6px;
+        background: rgba(30, 41, 59, 0.85);
+        border: 1px solid #475569;
+        overflow: hidden;
+      }
+
+      .danger-ramp-fill {
+        height: 100%;
+        width: 0%;
+        border-radius: 5px 0 0 5px;
+        background: linear-gradient(90deg, #ea580c, #dc2626);
+        box-shadow: 0 0 12px rgba(220, 38, 38, 0.35);
+      }
+
       .set-bonus-status {
-        margin: 8px 0 4px;
+        margin: 4px 0 4px;
         color: #93c5fd;
         font-size: 12px;
         min-height: 18px;
@@ -364,6 +733,7 @@
         line-height: 1.35;
         padding: 8px 10px;
         min-height: 18px;
+        white-space: pre-line;
       }
 
       .character-select-modal {
@@ -513,18 +883,49 @@
         margin-top: 14px;
       }
     </style>
-    <script type="module" crossorigin src="/Escape-Game/assets/escape-yMAxdsrG.js"></script>
+    <script type="module" crossorigin src="/Escape-Game/assets/escape-Bznz5-ad.js"></script>
     <link rel="modulepreload" crossorigin href="/Escape-Game/assets/modulepreload-polyfill-wMinxHhO.js">
   </head>
   <body>
     <main class="wrap">
       <h1>Escape</h1>
       <p class="info">Survive hunters, use abilities, collect heals, and last as long as possible.</p>
-      <div id="card-slots" class="card-slots" aria-label="Held cards">
-        <div class="card-slot">Empty Slot</div>
-        <div class="card-slot">Empty Slot</div>
-        <div class="card-slot">Empty Slot</div>
-        <div id="backpack-slot" class="card-slot">Backpack Empty</div>
+      <div id="player-deck-panel" class="player-deck-panel" aria-label="Deck and backpack">
+        <div class="player-deck-label-row">
+          <span class="deck-slots-label">Deck (one card per rank)</span>
+          <span class="deck-slots-label deck-slots-label--sub">Backpack (3)</span>
+        </div>
+        <div class="player-deck-grid" aria-label="Cards by rank and backpack">
+          <div id="deck-slot-1" class="card-slot deck-slot deck-slot--ace" aria-label="Ace"></div>
+          <div class="deck-middle-twelve" aria-label="Ranks two through king">
+            <div id="deck-slot-2" class="card-slot deck-slot" aria-label="Two"></div>
+            <div id="deck-slot-3" class="card-slot deck-slot" aria-label="Three"></div>
+            <div id="deck-slot-4" class="card-slot deck-slot" aria-label="Four"></div>
+            <div id="deck-slot-5" class="card-slot deck-slot" aria-label="Five"></div>
+            <div id="deck-slot-6" class="card-slot deck-slot" aria-label="Six"></div>
+            <div id="deck-slot-7" class="card-slot deck-slot" aria-label="Seven"></div>
+            <div id="deck-slot-8" class="card-slot deck-slot" aria-label="Eight"></div>
+            <div id="deck-slot-9" class="card-slot deck-slot" aria-label="Nine"></div>
+            <div id="deck-slot-10" class="card-slot deck-slot" aria-label="Ten"></div>
+            <div id="deck-slot-11" class="card-slot deck-slot" aria-label="Jack"></div>
+            <div id="deck-slot-12" class="card-slot deck-slot" aria-label="Queen"></div>
+            <div id="deck-slot-13" class="card-slot deck-slot" aria-label="King"></div>
+          </div>
+          <div id="backpack-slots" class="backpack-column" aria-label="Backpack">
+            <div id="backpack-slot-1" class="card-slot backpack-slot" aria-label="Backpack slot 1"></div>
+            <div id="backpack-slot-2" class="card-slot backpack-slot" aria-label="Backpack slot 2"></div>
+            <div id="backpack-slot-3" class="card-slot backpack-slot" aria-label="Backpack slot 3"></div>
+          </div>
+        </div>
+      </div>
+      <div class="danger-ramp-wrap" aria-label="Spawn pressure ramp">
+        <div class="danger-ramp-head">
+          <strong>Danger</strong>
+          <span id="danger-ramp-caption">Spawns tighten over 5:00</span>
+        </div>
+        <div class="danger-ramp-track">
+          <div id="danger-ramp-fill" class="danger-ramp-fill"></div>
+        </div>
       </div>
       <div id="set-bonus-status" class="set-bonus-status"></div>
       <div class="play-row">
@@ -580,7 +981,7 @@
           </div>
         </div>
       </div>
-      <p id="game-controls-hint" class="controls">Move: Arrows | Abilities: Q dash, W speed burst, E decoy | Pause: Space | Restart: R</p>
+      <p id="game-controls-hint" class="controls">Move: Arrows | Abilities: Q dash, W speed burst, E decoy | Pause: Space | Retry: R (character select)</p>
       <div class="meta">
         <button id="snapshot-folder-button" type="button">Choose Snapshot Folder</button>
         <span id="snapshot-status">Death screenshots: download fallback active</span>
@@ -618,23 +1019,25 @@
               down; at <strong>0 HP</strong> the run ends. Some effects grant temporary extra protection.
             </li>
             <li>
-              <strong>Health crystals</strong> — green pickups on the map restore HP so you can recover after a bad trade.
+              <strong>Health crystals</strong> — green pickups on the map restore HP (and slightly refresh your other ability
+              cooldowns) so you can recover after a bad trade.
             </li>
             <li>
-              <strong>Ultimate (R)</strong> — as you play, your ultimate bar fills with a random kit piece (shield, big push,
-              timelock, or heal). Press <strong>R</strong> when you have charges to spend it; after death, <strong>R</strong> also
-              restarts the run.
+              <strong>Ultimate (R)</strong> — comes from the <strong>Ace</strong> in your rank deck: each Ace has a random suit
+              and a random ultimate (orbiting shields, push waves, timelock, or vitality). Press <strong>R</strong> when it is
+              ready (20s cooldown after each use). After you die, <strong>R</strong> opens character select so you can pick a
+              hero again and start a fresh run.
             </li>
             <li>
-              <strong>Items (suit cards)</strong> — floating cards are gear. Touch one to open the pickup flow: place the card in
-              an active slot or your backpack, or swap with what you already carry. Each card applies a passive from its rank and
-              suit; read the card text to see exactly what it does.
+              <strong>Items (suit cards)</strong> — floating cards are gear. Touch one to open the pickup flow: your
+              <strong>deck</strong> has one slot per rank (A through K); you also have <strong>three backpack</strong> packs.
+              Place a pickup in its rank slot (or swap with the card already there), stash it in the backpack, or leave it. Only
+              passives from cards in your rank deck apply; the backpack is for swaps and planning.
             </li>
             <li>
-              <strong>Set bonuses</strong> — collecting <strong>three cards of the same suit</strong> in your three active slots
-              unlocks a extra bonus for that suit (shown under your slots during a run). Diamonds can offer a one-time choice for
-              the Knight; Hearts, Clubs, and Spades each have their own payoff, and some bonuses read differently on the Hungry
-              Rogue.
+              <strong>Set bonuses</strong> — collecting <strong>seven cards of the same suit</strong> in your rank deck unlocks
+              an extra bonus for that suit (shown under your deck during a run). Diamonds can offer a one-time choice for the
+              Knight; Hearts, Clubs, and Spades each have their own payoff, and some bonuses read differently on the Hungry Rogue.
             </li>
           </ul>
           <button type="button" id="character-howto-back-button" class="character-secondary-btn character-howto-back">Back</button>
@@ -655,6 +1058,7 @@
         <div class="card-modal-header">
           <button id="card-close-button" class="card-modal-close" type="button" aria-label="Close inventory">X</button>
         </div>
+        <div id="modal-deck-strip" class="modal-deck-strip"></div>
         <div id="card-modal-face" class="card-face"></div>
         <div id="card-swap-row" class="swap-row"></div>
         <div id="modal-set-bonus-status" class="modal-set-bonus-status"></div>
