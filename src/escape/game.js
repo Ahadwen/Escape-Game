@@ -94,6 +94,28 @@ import {
   SAFEHOUSE_EMBED_SITE_HIT_R,
   SAFEHOUSE_EMBED_CENTER_INSET,
   SAFEHOUSE_EMBED_HEX_VERTEX_R_MULT,
+  LUNATIC_PASSIVE_HP_PER_SEC,
+  LUNATIC_STUMBLE_MOVE_MULT,
+  LUNATIC_W_TOGGLE_COOLDOWN_SEC,
+  LUNATIC_SPRINT_MOMENTUM_RAMP_SEC,
+  LUNATIC_SPRINT_PEAK_SPEED_MULT,
+  LUNATIC_DECEL_SEC,
+  LUNATIC_DECEL_SPRINT_REF_SEC,
+  LUNATIC_CRASH_STUN_SEC,
+  LUNATIC_CRASH_DAMAGE_BRACKET_1_SEC,
+  LUNATIC_CRASH_DAMAGE_BRACKET_2_SEC,
+  LUNATIC_CRASH_DAMAGE_TIER_1,
+  LUNATIC_CRASH_DAMAGE_TIER_2,
+  LUNATIC_CRASH_DAMAGE_TIER_3,
+  LUNATIC_SPRINT_TIER_FX_DUR_T2,
+  LUNATIC_SPRINT_TIER_FX_DUR_T4,
+  LUNATIC_TURN_RADIUS_PX,
+  LUNATIC_STEER_MAX_RAD_PER_SEC,
+  LUNATIC_ROAR_COOLDOWN_SEC,
+  LUNATIC_ROAR_DURATION_SEC,
+  LUNATIC_ROAR_SPEED_MULT,
+  LUNATIC_ROAR_TERRAIN_DAMAGE_INTERVAL_SEC,
+  LUNATIC_ROAR_TERRAIN_DAMAGE,
 } from "./balance.js";
 
 /** Safehouse “level up” freeze + overlay duration (ms). */
@@ -804,7 +826,10 @@ function drawSafehouseHexWorld(ctx) {
   if (!cells.length) return;
   const activePrim = getPrimarySafehouseAxial();
   const prim =
-    state.safehouseInnerFacilitiesUnlocked && activePrim && isSafehouseHexActiveTile(activePrim.q, activePrim.r)
+    !isLunatic() &&
+    state.safehouseInnerFacilitiesUnlocked &&
+    activePrim &&
+    isSafehouseHexActiveTile(activePrim.q, activePrim.r)
       ? activePrim
       : null;
   for (const { q, r } of cells) {
@@ -864,6 +889,10 @@ function drawSafehouseHexWorld(ctx) {
 }
 
 function tickSafehouseEmbedRevealFromWallClock() {
+  if (isLunatic()) {
+    state.safehouseEmbedRevealAtMs = 0;
+    return;
+  }
   if (state.safehouseEmbedRevealAtMs > 0 && performance.now() >= state.safehouseEmbedRevealAtMs) {
     state.safehouseInnerFacilitiesUnlocked = true;
     state.safehouseEmbedRevealAtMs = 0;
@@ -1328,8 +1357,15 @@ function tryProceduralRareSpecialHex(q, r) {
   state.proceduralSurgeSpentKeys.delete(k);
   state.proceduralSafehouseSpentKeys.delete(k);
   const kindRoll = Math.random();
-  const kind =
-    kindRoll < 0.25 ? "arena" : kindRoll < 0.5 ? "roulette" : kindRoll < 0.75 ? "surge" : "safehouse";
+  const kind = isLunatic()
+    ? "safehouse"
+    : kindRoll < 0.25
+      ? "arena"
+      : kindRoll < 0.5
+        ? "roulette"
+        : kindRoll < 0.75
+          ? "surge"
+          : "safehouse";
   if (kind === "arena") state.proceduralArenaKeys.add(k);
   else if (kind === "roulette") state.proceduralRouletteKeys.add(k);
   else if (kind === "surge") state.proceduralSurgeKeys.add(k);
@@ -1953,7 +1989,7 @@ function applySafehouseLevelUp() {
   state.nextSpawnAt = state.elapsed + state.spawnInterval;
   runLog.event(LogCodes.EVT_SAFEHOUSE_LEVEL_UP, "Safehouse level accepted", {
     runLevel: state.runLevel,
-    innerFacilities: true,
+    innerFacilities: !isLunatic(),
   });
 }
 
@@ -2589,6 +2625,24 @@ const state = {
   forgeInnerExitLatch: false,
   /** Picked when showing forge confirm so commit matches preview. */
   forgePendingSuit: /** @type {string | null} */ (null),
+  /** @type {"stumble"|"sprint"|"decel"} */
+  lunaticPhase: "stumble",
+  lunaticMomentum: 0,
+  lunaticPressSprintUnlockAt: 0,
+  lunaticPressStopUnlockAt: 0,
+  lunaticDecelEndAt: 0,
+  lunaticDecelStartAt: 0,
+  lunaticSprintStartedAt: 0,
+  lunaticStunUntil: 0,
+  lunaticRoarUntil: 0,
+  lunaticRoarReadyAt: 0,
+  lunaticRoarTerrainDmgBank: 0,
+  lunaticSteerLeft: false,
+  lunaticSteerRight: false,
+  lunaticSprintTier2FxFired: false,
+  lunaticSprintTier4FxFired: false,
+  /** Lunatic: `hexKey` of spawn tile — heal pickups skip this hex. */
+  lunaticHealExcludeHexKey: /** @type {string} */ (""),
 };
 
 let snapshotDirectoryHandle = null;
@@ -2634,6 +2688,8 @@ const entities = {
   healPopups: [],
   smokeZones: [],
   foods: [],
+  /** @type {{ bornAt: number; expiresAt: number; tier: 2 | 4 }[]} */
+  lunaticSprintTierFx: [],
 };
 
 /** 14-length array: index 1..13 = card at that rank, or null. */
@@ -2657,6 +2713,7 @@ const inventory = {
   heartsResistanceReadyAt: 0,
   heartsResistanceCooldownDuration: 0,
   heartsRegenBank: 0,
+  lunaticRegenBank: 0,
   dodgeTextUntil: 0,
   rogueDiamondRangeBoost: false,
 };
@@ -3652,6 +3709,204 @@ function collidesAnyObstacle(circle) {
   return false;
 }
 
+function isLunatic() {
+  return selectedCharacter.id === "lunatic";
+}
+
+function lunaticSprintDamageImmune() {
+  if (!isLunatic()) return false;
+  return state.lunaticPhase === "sprint" || state.lunaticPhase === "decel";
+}
+
+/** Sprint scalar vs walk: `momentum` 0→1 over `LUNATIC_SPRINT_MOMENTUM_RAMP_SEC` from stumble mult to peak mult. */
+function lunaticSprintSpeedMultFromMomentum(m) {
+  return LUNATIC_STUMBLE_MOVE_MULT + (LUNATIC_SPRINT_PEAK_SPEED_MULT - LUNATIC_STUMBLE_MOVE_MULT) * m;
+}
+
+function removeObstaclesIntersectingPlayerCircle() {
+  const c = { x: player.x, y: player.y, r: player.r };
+  for (let i = obstacles.length - 1; i >= 0; i--) {
+    if (intersectsRectCircle(c, obstacles[i])) obstacles.splice(i, 1);
+  }
+}
+
+function lunaticCrashDamageFromSprintDur() {
+  const d = Math.max(0, state.elapsed - state.lunaticSprintStartedAt);
+  if (d <= LUNATIC_CRASH_DAMAGE_BRACKET_1_SEC) return LUNATIC_CRASH_DAMAGE_TIER_1;
+  if (d <= LUNATIC_CRASH_DAMAGE_BRACKET_2_SEC) return LUNATIC_CRASH_DAMAGE_TIER_2;
+  return LUNATIC_CRASH_DAMAGE_TIER_3;
+}
+
+function lunaticApplyCrashFromObstacle() {
+  damagePlayer(lunaticCrashDamageFromSprintDur(), { lunaticCrash: true });
+  spawnAttackRing(player.x, player.y, player.r + 14, "#fef9c3", 0.14);
+  spawnAttackRing(player.x, player.y, player.r + 34, "#fb923c", 0.28);
+  spawnAttackRing(player.x, player.y, player.r + 56, "#ea580c", 0.4);
+  state.lunaticPhase = "stumble";
+  state.lunaticMomentum = 0;
+  state.lunaticDecelEndAt = 0;
+  state.lunaticDecelStartAt = 0;
+  state.lunaticStunUntil = state.elapsed + LUNATIC_CRASH_STUN_SEC;
+  state.lunaticPressSprintUnlockAt = state.elapsed + LUNATIC_W_TOGGLE_COOLDOWN_SEC;
+  state.lunaticSprintTier2FxFired = false;
+  state.lunaticSprintTier4FxFired = false;
+}
+
+function tryLunaticWToggle() {
+  if (!state.running) return;
+  if (state.elapsed < state.lunaticStunUntil) return;
+  if (state.lunaticPhase === "stumble") {
+    if (state.elapsed < state.lunaticPressSprintUnlockAt) return;
+    state.lunaticPhase = "sprint";
+    state.lunaticMomentum = 0;
+    state.lunaticSprintStartedAt = state.elapsed;
+    state.lunaticSprintTier2FxFired = false;
+    state.lunaticSprintTier4FxFired = false;
+    state.lunaticPressStopUnlockAt = state.elapsed + LUNATIC_W_TOGGLE_COOLDOWN_SEC;
+    return;
+  }
+  if (state.lunaticPhase === "sprint") {
+    if (state.elapsed < state.lunaticPressStopUnlockAt) return;
+    const sprintDur = Math.max(0, state.elapsed - state.lunaticSprintStartedAt);
+    const decelScale = clamp(sprintDur / Math.max(1e-4, LUNATIC_DECEL_SPRINT_REF_SEC), 0, 1);
+    const decelDur = LUNATIC_DECEL_SEC * decelScale;
+    state.lunaticPhase = "decel";
+    state.lunaticDecelStartAt = state.elapsed;
+    state.lunaticDecelEndAt = state.elapsed + decelDur;
+    state.lunaticPressSprintUnlockAt = state.elapsed + LUNATIC_W_TOGGLE_COOLDOWN_SEC;
+    return;
+  }
+}
+
+function tryLunaticRoar() {
+  if (!state.running || !isLunatic()) return;
+  if (state.elapsed < state.lunaticRoarReadyAt) return;
+  if (state.lunaticPhase !== "sprint") return;
+  state.lunaticRoarUntil = state.elapsed + LUNATIC_ROAR_DURATION_SEC;
+  state.lunaticRoarReadyAt = state.elapsed + LUNATIC_ROAR_COOLDOWN_SEC;
+  state.lunaticRoarTerrainDmgBank = 0;
+  spawnAttackRing(player.x, player.y, player.r + 24, "#ef4444", 0.35);
+}
+
+function lunaticTickRoarTerrain(simDt) {
+  if (!isLunatic() || state.elapsed >= state.lunaticRoarUntil) return;
+  if (!collidesAnyObstacle({ x: player.x, y: player.y, r: player.r })) return;
+  state.lunaticRoarTerrainDmgBank += simDt;
+  while (state.lunaticRoarTerrainDmgBank >= LUNATIC_ROAR_TERRAIN_DAMAGE_INTERVAL_SEC) {
+    state.lunaticRoarTerrainDmgBank -= LUNATIC_ROAR_TERRAIN_DAMAGE_INTERVAL_SEC;
+    damagePlayer(LUNATIC_ROAR_TERRAIN_DAMAGE, { lunaticRoarTerrain: true });
+  }
+  removeObstaclesIntersectingPlayerCircle();
+}
+
+function updateLunaticMovement(dt, simDt) {
+  if (state.elapsed < state.lunaticStunUntil) {
+    moveCircleWithCollisions(player, 0, 0, dt, {});
+    return { touchedObstacle: false };
+  }
+
+  if (state.lunaticPhase === "decel" && state.elapsed >= state.lunaticDecelEndAt) {
+    state.lunaticPhase = "stumble";
+    state.lunaticMomentum = 0;
+    state.lunaticDecelEndAt = 0;
+    state.lunaticDecelStartAt = 0;
+  }
+
+  let mx = 0;
+  let my = 0;
+  if (state.keys.has("arrowleft")) mx -= 1;
+  if (state.keys.has("arrowright")) mx += 1;
+  if (state.keys.has("arrowup")) my -= 1;
+  if (state.keys.has("arrowdown")) my += 1;
+
+  if (state.lunaticPhase === "stumble") {
+    if (mx || my) {
+      const mlen = Math.hypot(mx, my);
+      player.facing.x = mx / mlen;
+      player.facing.y = my / mlen;
+    }
+    const laserSlowMult = state.elapsed < state.playerLaserSlowUntil ? LASER_BLUE_PLAYER_SLOW_MULT : 1;
+    const effectiveSpeed =
+      player.speed * playerSpeedHealthMultiplier() * laserSlowMult * LUNATIC_STUMBLE_MOVE_MULT;
+    const mlen = Math.hypot(mx, my) || 1;
+    return moveCircleWithCollisions(player, (mx / mlen) * effectiveSpeed, (my / mlen) * effectiveSpeed, dt, {});
+  }
+
+  let speedMult = 1;
+  if (state.lunaticPhase === "sprint") {
+    state.lunaticMomentum = Math.min(
+      1,
+      state.lunaticMomentum + simDt / Math.max(1e-4, LUNATIC_SPRINT_MOMENTUM_RAMP_SEC)
+    );
+    speedMult = lunaticSprintSpeedMultFromMomentum(state.lunaticMomentum);
+    if (state.elapsed < state.lunaticRoarUntil) speedMult *= LUNATIC_ROAR_SPEED_MULT;
+    const sprintDur = state.elapsed - state.lunaticSprintStartedAt;
+    if (!state.lunaticSprintTier2FxFired && sprintDur > LUNATIC_CRASH_DAMAGE_BRACKET_1_SEC) {
+      state.lunaticSprintTier2FxFired = true;
+      spawnLunaticSprintTierSpeedFx(2);
+    }
+    if (!state.lunaticSprintTier4FxFired && sprintDur > LUNATIC_CRASH_DAMAGE_BRACKET_2_SEC) {
+      state.lunaticSprintTier4FxFired = true;
+      spawnLunaticSprintTierSpeedFx(4);
+    }
+  } else if (state.lunaticPhase === "decel") {
+    const decelTotal = Math.max(1e-5, state.lunaticDecelEndAt - state.lunaticDecelStartAt);
+    const u = clamp(1 - (state.lunaticDecelEndAt - state.elapsed) / decelTotal, 0, 1);
+    const peak = lunaticSprintSpeedMultFromMomentum(state.lunaticMomentum);
+    speedMult = peak * (1 - u);
+    if (state.elapsed < state.lunaticRoarUntil) speedMult *= LUNATIC_ROAR_SPEED_MULT;
+  }
+
+  const laserSlowMult = state.elapsed < state.playerLaserSlowUntil ? LASER_BLUE_PLAYER_SLOW_MULT : 1;
+  const sp = player.speed * playerSpeedHealthMultiplier() * laserSlowMult * speedMult;
+  const yawRate = Math.min(LUNATIC_STEER_MAX_RAD_PER_SEC, sp / Math.max(1, LUNATIC_TURN_RADIUS_PX));
+
+  let fx = player.facing.x;
+  let fy = player.facing.y;
+  const fl0 = Math.hypot(fx, fy) || 1;
+  fx /= fl0;
+  fy /= fl0;
+
+  let steerLeft = state.lunaticSteerLeft || state.keys.has("arrowleft");
+  let steerRight = state.lunaticSteerRight || state.keys.has("arrowright");
+  if (steerLeft && steerRight) steerLeft = steerRight = false;
+
+  if (steerLeft) {
+    const ang = -yawRate * simDt;
+    const c = Math.cos(ang);
+    const s = Math.sin(ang);
+    const nx = fx * c - fy * s;
+    const ny = fx * s + fy * c;
+    fx = nx;
+    fy = ny;
+  }
+  if (steerRight) {
+    const ang = yawRate * simDt;
+    const c = Math.cos(ang);
+    const s = Math.sin(ang);
+    const nx = fx * c - fy * s;
+    const ny = fx * s + fy * c;
+    fx = nx;
+    fy = ny;
+  }
+  player.facing.x = fx;
+  player.facing.y = fy;
+  const vx = fx * sp;
+  const vy = fy * sp;
+  const prevX = player.x;
+  const prevY = player.y;
+  const roarPlowing = state.elapsed < state.lunaticRoarUntil;
+  const moveRes = moveCircleWithCollisions(player, vx, vy, dt, roarPlowing ? { ignoreObstacles: true } : {});
+  if (roarPlowing) return moveRes;
+  if (moveRes.touchedObstacle || collidesAnyObstacle(player)) {
+    player.x = prevX;
+    player.y = prevY;
+    lunaticApplyCrashFromObstacle();
+    return { touchedObstacle: true };
+  }
+  return moveRes;
+}
+
 /** After clubs burst (or any) phase-through ends inside a wall, snap to nearest free spot. */
 function ejectPlayerFromObstaclesIfStuck() {
   const c = { x: player.x, y: player.y, r: player.r };
@@ -3885,13 +4140,21 @@ function spawnLootPointClear(candidate) {
 function randomOpenPoint(radius, attempts = 96, opts = {}) {
   const excludeArenaNexus = !!opts.excludeArenaNexus;
   const excludeSpecialSpawnerHex = !!opts.excludeSpecialSpawnerHex;
+  const excludeHexKey = typeof opts.excludeHexKey === "string" && opts.excludeHexKey ? opts.excludeHexKey : null;
   const dMin = 96 + radius;
   const dMax = Math.min(VIEW_W, VIEW_H) * 0.66;
   const sourceHexes = activeHexes.length ? activeHexes : [{ q: 0, r: 0 }];
 
+  function isOnExcludedHex(x, y) {
+    if (!excludeHexKey) return false;
+    const h = worldToHex(x, y);
+    return hexKey(h.q, h.r) === excludeHexKey;
+  }
+
   function lootPointUsable(candidate) {
     if (excludeArenaNexus && isWorldPointOnSpecialLootForbiddenHex(candidate.x, candidate.y)) return false;
     if (excludeSpecialSpawnerHex && isWorldPointOnSpecialSpawnerForbiddenHex(candidate.x, candidate.y)) return false;
+    if (isOnExcludedHex(candidate.x, candidate.y)) return false;
     return spawnLootPointClear(candidate);
   }
 
@@ -3922,19 +4185,26 @@ function randomOpenPoint(radius, attempts = 96, opts = {}) {
     const candidate = { x: player.x + Math.cos(ang) * d, y: player.y + Math.sin(ang) * d, r: radius };
     if (excludeArenaNexus && isWorldPointOnSpecialLootForbiddenHex(candidate.x, candidate.y)) continue;
     if (excludeSpecialSpawnerHex && isWorldPointOnSpecialSpawnerForbiddenHex(candidate.x, candidate.y)) continue;
+    if (isOnExcludedHex(candidate.x, candidate.y)) continue;
     if (!collidesAnyObstacle(candidate)) return candidate;
   }
   for (let k = 0; k < 24; k++) {
     const candidate = { x: player.x + rand(-280, 280), y: player.y + rand(-280, 280), r: radius };
     if (excludeArenaNexus && isWorldPointOnSpecialLootForbiddenHex(candidate.x, candidate.y)) continue;
     if (excludeSpecialSpawnerHex && isWorldPointOnSpecialSpawnerForbiddenHex(candidate.x, candidate.y)) continue;
+    if (isOnExcludedHex(candidate.x, candidate.y)) continue;
     if (!collidesAnyObstacle(candidate)) return candidate;
   }
   for (let f = 0; f < 32; f++) {
     const p = { x: player.x + rand(-140, 140), y: player.y + rand(-140, 140), r: radius };
     if (excludeArenaNexus && isWorldPointOnSpecialLootForbiddenHex(p.x, p.y)) continue;
     if (excludeSpecialSpawnerHex && isWorldPointOnSpecialSpawnerForbiddenHex(p.x, p.y)) continue;
+    if (isOnExcludedHex(p.x, p.y)) continue;
     return p;
+  }
+  for (let z = 0; z < 24; z++) {
+    const p = { x: player.x + rand(-100, 100), y: player.y + rand(-100, 100), r: radius };
+    if (!isOnExcludedHex(p.x, p.y)) return p;
   }
   return { x: player.x + rand(-100, 100), y: player.y + rand(-100, 100), r: radius };
 }
@@ -4005,6 +4275,9 @@ function formatControlsHintLine() {
   if (selectedCharacter.id === "rogue") {
     return "Move: Arrows | Abilities: Q dash, W smoke bomb, E point to food | Pause: Space | Retry: R (character select)";
   }
+  if (selectedCharacter.id === "lunatic") {
+    return "Move: Arrows (stumble) | Sprint: W — hold Q or Left to curve left, E or Right to curve right | R roar (sprint only) | Pause: Space | Retry: R (character select)";
+  }
   return "Move: Arrows | Abilities: Q dash, W speed burst, E decoy | Pause: Space | Retry: R (character select)";
 }
 
@@ -4024,6 +4297,7 @@ function startGameWithCharacter(id) {
 function characterTutorialHtml(id) {
   const k = CHARACTERS.knight.abilities;
   const r = CHARACTERS.rogue.abilities;
+  const l = CHARACTERS.lunatic.abilities;
   if (id === "knight") {
     return `
       <p class="character-detail-lead">The <strong>Knight</strong> is a sturdy all-rounder: forgiving HP and a simple rhythm for learning waves, spacing, and how the arena moves.</p>
@@ -4045,6 +4319,18 @@ function characterTutorialHtml(id) {
         <li><strong>E — ${r.decoy.label}:</strong> for a short window, on-screen cues point toward nearby food—use it when you are low and need to find the next bite fast.</li>
       </ul>
       <p class="character-detail-lead" style="margin-top:10px">The top-left <strong>Fed</strong> bar and the arcs around your hero show hunger and stealth grace. Pause: Space · Retry: R returns to character select.</p>
+    `;
+  }
+  if (id === "lunatic") {
+    return `
+      <p class="character-detail-lead">The <strong>Lunatic</strong> cannot collect cards and does not roll procedural arena specials—only sanctuaries appear. Sanctuaries still offer a level-up, but the inner roulette and forge do not appear. Health crystals raise your <strong>max HP</strong> instead of healing.</p>
+      <ul>
+        <li><strong>Passive:</strong> slow health regeneration (similar to a hearts set bonus).</li>
+        <li><strong>W — ${l.burst.label}:</strong> toggle sprinting charge vs stumbling on foot. Each direction has its own short lockout. Releasing sprint runs a short deceleration whose length scales with how long you were sprinting (none at a tap, up to the full window after about five seconds). Slamming terrain while sprinting stuns you; crash damage scales with sprint time (1 / 2 / 3 for up to two seconds, up to four seconds, then above that) with a clear impact flash.</li>
+        <li><strong>Q / E — ${l.dash.label} / ${l.decoy.label}:</strong> while sprinting (or decelerating from a stop), hold to curve — same as <strong>Left / Right arrow</strong>. Turn rate follows a minimum turning circle (tighter at lower speed).</li>
+        <li><strong>R — ${l.random.label}:</strong> 30s cooldown, sprint-only: briefly surge faster; terrain you touch is torn away, but staying inside it still ticks heavy damage.</li>
+      </ul>
+      <p class="character-detail-lead" style="margin-top:10px">Pause: Space · After death, <strong>R</strong> returns to character select.</p>
     `;
   }
   return "";
@@ -4239,9 +4525,25 @@ function resetGame() {
   state.rogueNextHungryPopupAt = 8;
   state.rogueDashAiming = false;
   state.rogueLastKnownPlayerPos = { x: player.x, y: player.y };
+  state.lunaticPhase = "stumble";
+  state.lunaticMomentum = 0;
+  state.lunaticPressSprintUnlockAt = 0;
+  state.lunaticPressStopUnlockAt = 0;
+  state.lunaticDecelEndAt = 0;
+  state.lunaticDecelStartAt = 0;
+  state.lunaticSprintStartedAt = 0;
+  state.lunaticStunUntil = 0;
+  state.lunaticRoarUntil = 0;
+  state.lunaticRoarReadyAt = 0;
+  state.lunaticRoarTerrainDmgBank = 0;
+  state.lunaticSteerLeft = false;
+  state.lunaticSteerRight = false;
+  state.lunaticSprintTier2FxFired = false;
+  state.lunaticSprintTier4FxFired = false;
   player.x = 96;
   player.y = 340;
   const spawnAxial = worldToHex(96, 340);
+  state.lunaticHealExcludeHexKey = isLunatic() ? hexKey(spawnAxial.q, spawnAxial.r) : "";
   initSpecialHexTiles(spawnAxial.q, spawnAxial.r);
   if (rouletteModal) rouletteModal.hidden = true;
   if (forgeModal) forgeModal.hidden = true;
@@ -4282,6 +4584,7 @@ function resetGame() {
   entities.healPopups = [];
   entities.smokeZones = [];
   entities.foods = [];
+  entities.lunaticSprintTierFx = [];
   inventory.deckByRank = makeEmptyDeckByRank();
   inventory.backpackSlots = [null, null, null];
   inventory.diamondEmpower = null;
@@ -4294,6 +4597,7 @@ function resetGame() {
   inventory.heartsResistanceReadyAt = 0;
   inventory.heartsResistanceCooldownDuration = 0;
   inventory.heartsRegenBank = 0;
+  inventory.lunaticRegenBank = 0;
   inventory.dodgeTextUntil = 0;
   passive.cooldownFlat = makeCooldownFlatForCharacter(selectedCharacter);
   passive.cooldownPct = makeCooldownPctForCharacter(selectedCharacter);
@@ -4455,6 +4759,165 @@ function drawPlayerBody(ctx, invulnAlpha) {
   ctx.closePath();
   ctx.fill();
   ctx.restore();
+}
+
+/** Sprint-only: arrow along charge direction past the body. */
+function drawLunaticSprintDirectionArrow(ctx) {
+  if (!isLunatic() || state.lunaticPhase !== "sprint") return;
+  const px = player.x;
+  const py = player.y;
+  const pr = player.r;
+  let fx = player.facing.x;
+  let fy = player.facing.y;
+  const fl = Math.hypot(fx, fy) || 1;
+  fx /= fl;
+  fy /= fl;
+  const stemStart = pr + 4;
+  const stemEnd = pr + 26;
+  const tipDist = pr + 42;
+  const headHalf = 9;
+  const sx = px + fx * stemStart;
+  const sy = py + fy * stemStart;
+  const ex = px + fx * stemEnd;
+  const ey = py + fy * stemEnd;
+  const tipX = px + fx * tipDist;
+  const tipY = py + fy * tipDist;
+  const ox = -fy * headHalf;
+  const oy = fx * headHalf;
+  ctx.save();
+  ctx.strokeStyle = "rgba(251, 191, 36, 0.95)";
+  ctx.fillStyle = "rgba(254, 249, 195, 0.88)";
+  ctx.lineWidth = 2.5;
+  ctx.lineCap = "round";
+  ctx.beginPath();
+  ctx.moveTo(sx, sy);
+  ctx.lineTo(ex, ey);
+  ctx.stroke();
+  ctx.lineJoin = "round";
+  ctx.beginPath();
+  ctx.moveTo(tipX, tipY);
+  ctx.lineTo(ex + ox, ey + oy);
+  ctx.lineTo(ex - ox, ey - oy);
+  ctx.closePath();
+  ctx.fill();
+  ctx.stroke();
+  ctx.restore();
+}
+
+/** Red pulse / rings while Roar buff is active. */
+function drawLunaticRoarFx(ctx, bodyAlpha) {
+  if (!isLunatic() || state.elapsed >= state.lunaticRoarUntil) return;
+  const px = player.x;
+  const py = player.y;
+  const pr = player.r;
+  const throb = 0.55 + 0.45 * (0.5 + 0.5 * Math.sin(state.elapsed * 22));
+  ctx.save();
+  ctx.lineCap = "round";
+  for (let i = 0; i < 4; i++) {
+    const rr = pr + 8 + i * 11 + throb * 10;
+    const a = (0.42 - i * 0.07) * bodyAlpha * throb;
+    ctx.strokeStyle = `rgba(220, 38, 38, ${a})`;
+    ctx.lineWidth = 2.4 - i * 0.35;
+    ctx.beginPath();
+    ctx.arc(px, py, rr, 0, TAU);
+    ctx.stroke();
+  }
+  const fx = player.facing.x;
+  const fy = player.facing.y;
+  const fl = Math.hypot(fx, fy) || 1;
+  const fan = Math.PI * 0.42;
+  const baseAng = Math.atan2(fy / fl, fx / fl);
+  ctx.globalAlpha = 0.28 * bodyAlpha * throb;
+  ctx.fillStyle = "rgba(248, 113, 113, 0.55)";
+  ctx.beginPath();
+  ctx.moveTo(px, py);
+  ctx.arc(px, py, pr + 36, baseAng - fan / 2, baseAng + fan / 2);
+  ctx.closePath();
+  ctx.fill();
+  ctx.globalAlpha = 1;
+  ctx.restore();
+}
+
+/** Thin bar under the player: Roar time remaining. */
+function drawLunaticRoarTimerBar(ctx, bodyAlpha) {
+  if (!isLunatic() || state.elapsed >= state.lunaticRoarUntil) return;
+  const px = player.x;
+  const py = player.y;
+  const pr = player.r;
+  const dur = Math.max(0.001, LUNATIC_ROAR_DURATION_SEC);
+  const rem = Math.max(0, state.lunaticRoarUntil - state.elapsed);
+  const ratio = clamp(rem / dur, 0, 1);
+  const barW = 48;
+  const barH = 5;
+  const x = px - barW / 2;
+  const y = py + pr + 11;
+  ctx.save();
+  ctx.globalAlpha = bodyAlpha;
+  ctx.fillStyle = "rgba(15, 23, 42, 0.82)";
+  ctx.fillRect(x - 1, y - 1, barW + 2, barH + 2);
+  ctx.strokeStyle = "rgba(248, 113, 113, 0.95)";
+  ctx.lineWidth = 1;
+  ctx.strokeRect(x - 0.5, y - 0.5, barW + 1, barH + 1);
+  ctx.fillStyle = "rgba(30, 41, 59, 0.98)";
+  ctx.fillRect(x, y, barW, barH);
+  ctx.fillStyle = ratio > 0.22 ? "#dc2626" : "#f87171";
+  ctx.fillRect(x, y, barW * ratio, barH);
+  ctx.restore();
+}
+
+function spawnLunaticSprintTierSpeedFx(tier) {
+  if (!isLunatic()) return;
+  const dur = tier === 4 ? LUNATIC_SPRINT_TIER_FX_DUR_T4 : LUNATIC_SPRINT_TIER_FX_DUR_T2;
+  entities.lunaticSprintTierFx.push({
+    bornAt: state.elapsed,
+    expiresAt: state.elapsed + dur,
+    tier: /** @type {2 | 4} */ (tier),
+  });
+}
+
+/** Comic speed lines when crossing sprint damage brackets (>2s / >4s). */
+function drawLunaticSprintTierSpeedFx(ctx) {
+  if (!isLunatic() || !entities.lunaticSprintTierFx.length) return;
+  let ffx = player.facing.x;
+  let ffy = player.facing.y;
+  const fl = Math.hypot(ffx, ffy) || 1;
+  ffx /= fl;
+  ffy /= fl;
+  const bx = -ffx;
+  const by = -ffy;
+  const px = -ffy;
+  const py = ffx;
+  const cx = player.x;
+  const cy = player.y;
+  for (const b of entities.lunaticSprintTierFx) {
+    const span = Math.max(1e-4, b.expiresAt - b.bornAt);
+    const u = clamp((state.elapsed - b.bornAt) / span, 0, 1);
+    const fade = 1 - u;
+    const lineCount = b.tier === 4 ? 12 : 8;
+    const baseLen = (b.tier === 4 ? 78 : 56) * (0.72 + 0.28 * fade);
+    const spreadW = b.tier === 4 ? 26 : 18;
+    const jitter = (b.tier === 4 ? 5 : 3) * Math.sin(state.elapsed * 38 + b.bornAt * 7);
+    ctx.save();
+    ctx.lineCap = "round";
+    for (let i = 0; i < lineCount; i++) {
+      const t = lineCount <= 1 ? 0 : i / (lineCount - 1) - 0.5;
+      const off = spreadW * t + jitter * (0.35 + 0.65 * Math.abs(t));
+      const len = baseLen * (0.82 + 0.18 * Math.abs(t));
+      const x0 = cx + bx * 14 + px * off;
+      const y0 = cy + by * 14 + py * off;
+      const x1 = cx + bx * (14 + len) + px * off * 1.08;
+      const y1 = cy + by * (14 + len) + py * off * 1.08;
+      const a = (b.tier === 4 ? 0.55 : 0.42) * fade;
+      ctx.strokeStyle =
+        b.tier === 4 ? `rgba(254, 215, 170, ${a})` : `rgba(125, 211, 252, ${a})`;
+      ctx.lineWidth = b.tier === 4 ? 2.1 : 1.45;
+      ctx.beginPath();
+      ctx.moveTo(x0, y0);
+      ctx.lineTo(x1, y1);
+      ctx.stroke();
+    }
+    ctx.restore();
+  }
 }
 
 function drawPlayerHpHud(ctx) {
@@ -4857,7 +5320,10 @@ function advanceSpawnWave() {
 }
 
 function spawnPickup() {
-  const point = randomOpenPoint(HEAL_PICKUP_HIT_R, 96, { excludeArenaNexus: true });
+  const point = randomOpenPoint(HEAL_PICKUP_HIT_R, 96, {
+    excludeArenaNexus: true,
+    excludeHexKey: state.lunaticHealExcludeHexKey || undefined,
+  });
   entities.pickups.push({
     x: point.x,
     y: point.y,
@@ -4871,6 +5337,7 @@ function spawnPickup() {
 }
 
 function spawnCardPickup() {
+  if (isLunatic()) return;
   const point = randomOpenPoint(16, 96, { excludeArenaNexus: true });
   entities.cards.push({
     x: point.x,
@@ -5053,6 +5520,7 @@ function updateCardPickups() {
 }
 
 function tryDash() {
+  if (selectedCharacter.id === "lunatic") return;
   const ability = abilities.dash;
   if (!state.running) return;
   if (
@@ -5178,6 +5646,10 @@ function releaseRogueDashAim() {
 
 function tryBurst() {
   const ability = abilities.burst;
+  if (selectedCharacter.id === "lunatic") {
+    tryLunaticWToggle();
+    return;
+  }
   if (state.elapsed < ability.nextReadyAt || !state.running) return;
   if (selectedCharacter.id === "rogue") {
     ability.nextReadyAt = state.elapsed + effectiveAbilityCooldown("burst", ability.cooldown, ability.minCooldown ?? 1);
@@ -5202,6 +5674,7 @@ function tryBurst() {
 }
 
 function tryDecoy() {
+  if (selectedCharacter.id === "lunatic") return;
   const ability = abilities.decoy;
   if (state.elapsed < ability.nextReadyAt || !state.running) return;
   if (selectedCharacter.id === "rogue") {
@@ -5766,6 +6239,7 @@ function damagePlayer(amount, opts = {}) {
   if (!state.running) return;
   const rouletteHexOuter = !!opts.rouletteHexOuterPenalty;
   if (!rouletteHexOuter) {
+    if (lunaticSprintDamageImmune() && !opts.lunaticCrash && !opts.lunaticRoarTerrain) return;
     if (selectedCharacter.id === "rogue" && state.rogueStealthActive) return;
     if (selectedCharacter.id === "rogue" && state.elapsed < inventory.spadesLandingStealthUntil) return;
     if (state.elapsed < state.playerInvulnerableUntil) return;
@@ -5776,7 +6250,12 @@ function damagePlayer(amount, opts = {}) {
       return;
     }
     const heartsResistanceCount = getHeartsResistanceCardCount();
-    if (heartsResistanceCount > 0 && state.elapsed >= inventory.heartsResistanceReadyAt) {
+    if (
+      heartsResistanceCount > 0 &&
+      state.elapsed >= inventory.heartsResistanceReadyAt &&
+      !opts.lunaticCrash &&
+      !opts.lunaticRoarTerrain
+    ) {
       const cd = getHeartsResistanceCooldown();
       inventory.heartsResistanceCooldownDuration = cd;
       inventory.heartsResistanceReadyAt = state.elapsed + cd;
@@ -5954,8 +6433,14 @@ function updateCollisions() {
     const rr = p.r + player.r;
     if (distSq(p, player) <= rr * rr) {
       clearTempHp();
-      player.hp = Math.min(player.maxHp, player.hp + p.heal);
-      runLog.event(LogCodes.EVT_HEAL_PICKUP, "Picked up heal cross", { heal: p.heal, hpAfter: player.hp, maxHp: player.maxHp });
+      if (isLunatic()) {
+        player.maxHp += 1;
+        player.hp = Math.min(player.maxHp, player.hp + 1);
+        runLog.event(LogCodes.EVT_HEAL_PICKUP, "Crystal max HP +1", { hpAfter: player.hp, maxHp: player.maxHp });
+      } else {
+        player.hp = Math.min(player.maxHp, player.hp + p.heal);
+        runLog.event(LogCodes.EVT_HEAL_PICKUP, "Picked up heal cross", { heal: p.heal, hpAfter: player.hp, maxHp: player.maxHp });
+      }
       // Heal pickup slightly refreshes ability cooldowns.
       const refreshFactor = 0.8; // 20% shorter remaining cooldown
       for (const ability of [abilities.dash, abilities.burst, abilities.decoy]) {
@@ -6157,6 +6642,15 @@ function update(dt) {
     }
     if (player.hp >= player.maxHp) inventory.heartsRegenBank = 0;
   }
+  if (isLunatic() && player.hp > 0) {
+    inventory.lunaticRegenBank += LUNATIC_PASSIVE_HP_PER_SEC * simDt;
+    while (inventory.lunaticRegenBank >= 1 && player.hp < player.maxHp) {
+      inventory.lunaticRegenBank -= 1;
+      player.hp = Math.min(player.maxHp, player.hp + 1);
+      spawnHealPopup(player.x, player.y - player.r - 8, "+1", "#fda4af");
+    }
+    if (player.hp >= player.maxHp) inventory.lunaticRegenBank = 0;
+  }
   if (dashState.charges < dashState.maxCharges && state.elapsed >= dashState.nextRechargeAt) {
     // Dash recharge refills all charges together.
     dashState.charges = dashState.maxCharges;
@@ -6180,7 +6674,7 @@ function update(dt) {
     const lootScale = lootSpawnIntervalScale();
     state.nextPickupAt = state.elapsed + (PICKUP_SPAWN_INTERVAL + rand(-0.45, 0.85)) * lootScale;
   }
-  if (state.elapsed >= state.nextCardAt) {
+  if (!isLunatic() && state.elapsed >= state.nextCardAt) {
     spawnCardPickup();
     const lootScale = lootSpawnIntervalScale();
     state.nextCardAt = state.elapsed + (CARD_SPAWN_INTERVAL + rand(-1.6, 3.4)) * lootScale;
@@ -6198,6 +6692,9 @@ function update(dt) {
   for (let i = entities.damageRipples.length - 1; i >= 0; i--) {
     if (state.elapsed >= entities.damageRipples[i].expiresAt) entities.damageRipples.splice(i, 1);
   }
+  for (let i = entities.lunaticSprintTierFx.length - 1; i >= 0; i--) {
+    if (state.elapsed >= entities.lunaticSprintTierFx[i].expiresAt) entities.lunaticSprintTierFx.splice(i, 1);
+  }
   for (let i = entities.ultimateEffects.length - 1; i >= 0; i--) {
     if (state.elapsed >= entities.ultimateEffects[i].expiresAt) entities.ultimateEffects.splice(i, 1);
   }
@@ -6211,57 +6708,71 @@ function update(dt) {
     if (state.elapsed >= entities.smokeZones[i].expiresAt) entities.smokeZones.splice(i, 1);
   }
 
-  let mx = 0;
-  let my = 0;
-  if (state.keys.has("arrowleft")) mx -= 1;
-  if (state.keys.has("arrowright")) mx += 1;
-  if (state.keys.has("arrowup")) my -= 1;
-  if (state.keys.has("arrowdown")) my += 1;
-  if (mx || my) {
-    const mlen = Math.hypot(mx, my);
-    mx /= mlen;
-    my /= mlen;
-    player.facing.x = mx;
-    player.facing.y = my;
-  }
+  let moveRes = { touchedObstacle: false };
+  let moving = false;
+  if (isLunatic()) {
+    moveRes = updateLunaticMovement(dt, simDt);
+    moving =
+      state.lunaticPhase === "sprint" ||
+      state.lunaticPhase === "decel" ||
+      state.keys.has("arrowleft") ||
+      state.keys.has("arrowright") ||
+      state.keys.has("arrowup") ||
+      state.keys.has("arrowdown");
+    lunaticTickRoarTerrain(simDt);
+    if (collidesAnyObstacle(player)) ejectPlayerFromObstaclesIfStuck();
+  } else {
+    let mx = 0;
+    let my = 0;
+    if (state.keys.has("arrowleft")) mx -= 1;
+    if (state.keys.has("arrowright")) mx += 1;
+    if (state.keys.has("arrowup")) my -= 1;
+    if (state.keys.has("arrowdown")) my += 1;
+    if (mx || my) {
+      const mlen = Math.hypot(mx, my);
+      mx /= mlen;
+      my /= mlen;
+      player.facing.x = mx;
+      player.facing.y = my;
+    }
 
-  if (selectedCharacter.id === "rogue" && state.rogueDashAiming) {
-    // Hold-to-aim dash: freeze movement while arrows still rotate aim direction.
-    mx = 0;
-    my = 0;
-  }
+    if (selectedCharacter.id === "rogue" && state.rogueDashAiming) {
+      mx = 0;
+      my = 0;
+    }
 
-  if (state.playerTimelockUntil > 0) {
-    mx = 0;
-    my = 0;
-  }
+    if (state.playerTimelockUntil > 0) {
+      mx = 0;
+      my = 0;
+    }
 
-  const burstSpeedLeg =
-    inventory.diamondEmpower === "speedPassive" || diamondsOmniEmpowerActive() || state.elapsed < player.burstUntil;
-  const wBurstMult = burstSpeedLeg ? (knightDiamondBurstEmpowerActive() ? KNIGHT_DIAMOND_BURST_SPEED_MULT : 2) : 1;
-  const ultSpeedMult = state.elapsed < player.ultimateSpeedUntil ? 1.75 : 1;
-  const terrainMult = state.elapsed < inventory.spadesObstacleBoostUntil ? 1 + passive.obstacleTouchMult : 1;
-  const burstBonus = Math.max(0, Math.max(wBurstMult, ultSpeedMult) - 1);
-  const passiveBonus = Math.max(0, passive.speedMult - 1);
-  const terrainBonus = Math.max(0, terrainMult - 1);
-  const hungerLeftRatio =
-    selectedCharacter.id === "rogue"
-      ? clamp(state.rogueHunger / Math.max(0.001, state.rogueHungerMax), 0, 1)
-      : 1;
-  const rogueDesperationSpeed =
-    selectedCharacter.id === "rogue" ? (1 - hungerLeftRatio) * ROGUE_DESPERATION_SPEED_MAX : 0;
-  const speedMult = 1 + burstBonus + passiveBonus + terrainBonus + rogueDesperationSpeed;
-  const laserSlowMult = state.elapsed < state.playerLaserSlowUntil ? LASER_BLUE_PLAYER_SLOW_MULT : 1;
-  const effectiveSpeed = player.speed * speedMult * playerSpeedHealthMultiplier() * laserSlowMult;
-  const moving = mx !== 0 || my !== 0;
-  const phaseThrough =
-    inventory.clubsPhaseThroughTerrain &&
-    (selectedCharacter.id === "rogue" ? playerInsideSmoke() : state.elapsed < player.burstUntil);
-  const moveRes = moveCircleWithCollisions(player, mx * effectiveSpeed, my * effectiveSpeed, dt, {
-    ignoreObstacles: phaseThrough,
-  });
-  if (!phaseThrough && collidesAnyObstacle(player)) {
-    ejectPlayerFromObstaclesIfStuck();
+    const burstSpeedLeg =
+      inventory.diamondEmpower === "speedPassive" || diamondsOmniEmpowerActive() || state.elapsed < player.burstUntil;
+    const wBurstMult = burstSpeedLeg ? (knightDiamondBurstEmpowerActive() ? KNIGHT_DIAMOND_BURST_SPEED_MULT : 2) : 1;
+    const ultSpeedMult = state.elapsed < player.ultimateSpeedUntil ? 1.75 : 1;
+    const terrainMult = state.elapsed < inventory.spadesObstacleBoostUntil ? 1 + passive.obstacleTouchMult : 1;
+    const burstBonus = Math.max(0, Math.max(wBurstMult, ultSpeedMult) - 1);
+    const passiveBonus = Math.max(0, passive.speedMult - 1);
+    const terrainBonus = Math.max(0, terrainMult - 1);
+    const hungerLeftRatio =
+      selectedCharacter.id === "rogue"
+        ? clamp(state.rogueHunger / Math.max(0.001, state.rogueHungerMax), 0, 1)
+        : 1;
+    const rogueDesperationSpeed =
+      selectedCharacter.id === "rogue" ? (1 - hungerLeftRatio) * ROGUE_DESPERATION_SPEED_MAX : 0;
+    const speedMult = 1 + burstBonus + passiveBonus + terrainBonus + rogueDesperationSpeed;
+    const laserSlowMult = state.elapsed < state.playerLaserSlowUntil ? LASER_BLUE_PLAYER_SLOW_MULT : 1;
+    const effectiveSpeed = player.speed * speedMult * playerSpeedHealthMultiplier() * laserSlowMult;
+    moving = mx !== 0 || my !== 0;
+    const phaseThrough =
+      inventory.clubsPhaseThroughTerrain &&
+      (selectedCharacter.id === "rogue" ? playerInsideSmoke() : state.elapsed < player.burstUntil);
+    moveRes = moveCircleWithCollisions(player, mx * effectiveSpeed, my * effectiveSpeed, dt, {
+      ignoreObstacles: phaseThrough,
+    });
+    if (!phaseThrough && collidesAnyObstacle(player)) {
+      ejectPlayerFromObstaclesIfStuck();
+    }
   }
   clampPlayerToArenaNexusInnerHex();
   clampPlayerToSurgeLockHex();
@@ -6417,6 +6928,72 @@ function drawRogueSurvivalHud(ctx) {
 
 function updateAbilityButtons() {
   if (!abilitySlots) return;
+  if (isLunatic()) {
+    const sprintCdRem = Math.max(0, state.lunaticPressSprintUnlockAt - state.elapsed);
+    const stopCdRem = Math.max(0, state.lunaticPressStopUnlockAt - state.elapsed);
+    const wBarRem = Math.max(sprintCdRem, stopCdRem);
+    const roarRem = Math.max(0, state.lunaticRoarReadyAt - state.elapsed);
+    const abilitiesUi = [
+      {
+        key: abilities.dash.key.toUpperCase(),
+        label: abilities.dash.label,
+        color: "#38bdf8",
+        remaining: 0,
+        duration: 0.001,
+        extra: "Hold",
+      },
+      {
+        key: abilities.burst.key.toUpperCase(),
+        label: abilities.burst.label,
+        color: "#22d3ee",
+        remaining: wBarRem,
+        duration: LUNATIC_W_TOGGLE_COOLDOWN_SEC,
+        extra: "Stumble/Sprint",
+        lunaticSprintCdRem: sprintCdRem,
+        lunaticStopCdRem: stopCdRem,
+      },
+      {
+        key: abilities.decoy.key.toUpperCase(),
+        label: abilities.decoy.label,
+        color: "#a78bfa",
+        remaining: 0,
+        duration: 0.001,
+        extra: "Hold",
+      },
+      {
+        key: abilities.random.key.toUpperCase(),
+        label: abilities.random.label,
+        color: "#f97316",
+        remaining: roarRem,
+        duration: LUNATIC_ROAR_COOLDOWN_SEC,
+        extra: state.lunaticPhase === "sprint" ? "Sprint" : "—",
+      },
+    ];
+    for (let i = 0; i < abilitiesUi.length; i++) {
+      const info = abilitiesUi[i];
+      const slot = abilitySlots[i];
+      if (!slot) continue;
+      const fill = slot.querySelector(".ability-fill");
+      const keyEl = slot.querySelector(".ability-key");
+      const labelEl = slot.querySelector(".ability-label");
+      const valueEl = slot.querySelector(".ability-value");
+      if (!fill || !keyEl || !labelEl || !valueEl) continue;
+      const cooldownProgress = clamp(1 - info.remaining / Math.max(0.001, info.duration), 0, 1);
+      fill.style.width = `${Math.round(cooldownProgress * 100)}%`;
+      keyEl.textContent = info.key;
+      labelEl.textContent = info.label;
+      if (i === 1 && info.lunaticSprintCdRem != null && info.lunaticStopCdRem != null) {
+        const fmt = (r) => (r < 0.05 ? "ready" : `${r.toFixed(1)}s`);
+        valueEl.classList.add("ability-value--lunatic-w");
+        valueEl.textContent = `Sprint ${fmt(info.lunaticSprintCdRem)}\nStop ${fmt(info.lunaticStopCdRem)}`;
+      } else {
+        valueEl.classList.remove("ability-value--lunatic-w");
+        valueEl.textContent = info.extra;
+      }
+      slot.style.borderColor = info.color;
+    }
+    return;
+  }
   const dashReduction = Math.max(0, passive.cooldownFlat.dash || 0);
   const burstReduction = Math.max(0, passive.cooldownFlat.burst || 0);
   const decoyReduction = Math.max(
@@ -6510,6 +7087,7 @@ function updateAbilityButtons() {
     keyEl.textContent = info.key;
     labelEl.textContent = info.label;
     const cooldownText = info.remaining > 0.01 ? info.remaining.toFixed(1) + "s" : info.extra || "READY";
+    valueEl.classList.remove("ability-value--lunatic-w");
     valueEl.textContent = cooldownText;
   }
 }
@@ -6756,7 +7334,7 @@ function render(tsMs) {
   drawSurgeHexWorld(ctx);
   if (
     state.elapsed < state.rouletteScreenFlashUntil &&
-    (hasAnyRouletteHexSite() || state.safehouseInnerFacilitiesUnlocked)
+    (hasAnyRouletteHexSite() || (!isLunatic() && state.safehouseInnerFacilitiesUnlocked))
   ) {
     const u = clamp((state.rouletteScreenFlashUntil - state.elapsed) / 0.4, 0, 1);
     ctx.fillStyle = `rgba(220, 38, 38, ${0.38 * u})`;
@@ -6768,7 +7346,7 @@ function render(tsMs) {
         ctx.fill();
       }
     }
-    if (state.safehouseInnerFacilitiesUnlocked) {
+    if (!isLunatic() && state.safehouseInnerFacilitiesUnlocked) {
       const prim = getPrimarySafehouseAxial();
       if (prim) {
         const rw = getSafehouseEmbeddedRouletteWorld(prim);
@@ -7209,6 +7787,8 @@ function render(tsMs) {
     ctx.globalAlpha = 1;
   }
 
+  drawLunaticSprintTierSpeedFx(ctx);
+
   let playerBodyAlpha =
     state.elapsed < state.playerInvulnerableUntil
       ? 0.45 + 0.4 * (0.5 + 0.5 * Math.sin(state.elapsed * 32))
@@ -7219,6 +7799,9 @@ function render(tsMs) {
     playerBodyAlpha = Math.min(playerBodyAlpha, ghostAlpha);
   }
   drawPlayerBody(ctx, playerBodyAlpha);
+  drawLunaticSprintDirectionArrow(ctx);
+  drawLunaticRoarFx(ctx, playerBodyAlpha);
+  drawLunaticRoarTimerBar(ctx, playerBodyAlpha);
   if (state.playerTimelockUntil > 0) {
     const timePulse = 0.6 + 0.4 * (0.5 + 0.5 * Math.sin(state.elapsed * 14));
     drawCircle(ctx, player.x, player.y, player.r + 10 + timePulse * 4, "#c084fc", 0.18);
@@ -7525,6 +8108,25 @@ function onAbilityKey(key) {
   )
     return;
   if (state.pausedForCard || state.pausedForRoulette || state.pausedForSafehousePrompt || state.pausedForForge) return;
+  if (isLunatic()) {
+    if (key === abilities.dash.key) {
+      state.lunaticSteerLeft = true;
+      return;
+    }
+    if (key === abilities.decoy.key) {
+      state.lunaticSteerRight = true;
+      return;
+    }
+    if (key === abilities.burst.key) {
+      tryLunaticWToggle();
+      return;
+    }
+    if (key === abilities.random.key) {
+      tryLunaticRoar();
+      return;
+    }
+    return;
+  }
   if (key === abilities.dash.key) {
     if (selectedCharacter.id === "rogue") {
       startRogueDashAim();
@@ -7588,6 +8190,8 @@ window.addEventListener("keydown", (event) => {
     state.manualPause = true;
     runLog.event(LogCodes.EVT_MANUAL_PAUSE, "Manual pause: paused (Space)");
     state.keys.clear();
+    state.lunaticSteerLeft = false;
+    state.lunaticSteerRight = false;
     return;
   }
   if (state.waitingForMovementResume) {
@@ -7604,6 +8208,10 @@ window.addEventListener("keyup", (event) => {
   const key = event.key.toLowerCase();
   if (key.startsWith("arrow")) event.preventDefault();
   if (key.startsWith("arrow")) state.keys.delete(key);
+  if (isLunatic()) {
+    if (key === abilities.dash.key) state.lunaticSteerLeft = false;
+    if (key === abilities.decoy.key) state.lunaticSteerRight = false;
+  }
   if (key === abilities.dash.key) releaseRogueDashAim();
 });
 
@@ -7631,7 +8239,7 @@ if (safehouseLevelYes) {
     applySafehouseLevelUp();
     player.hp = player.maxHp;
     state.runLevelUpCinematic = { startMs: performance.now(), announceLevel: displayWorldLevel() };
-    state.safehouseEmbedRevealAtMs = performance.now() + 830;
+    if (!isLunatic()) state.safehouseEmbedRevealAtMs = performance.now() + 830;
     if (tileK) {
       state.safehouseAwaitingLeaveAfterLevelUp = true;
       state.safehouseLevelUpTileKey = tileK;

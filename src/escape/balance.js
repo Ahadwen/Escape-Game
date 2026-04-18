@@ -109,7 +109,53 @@ export const CHARACTERS = {
       random: { key: "r", label: "Ultimate" },
     },
   },
+  lunatic: {
+    id: "lunatic",
+    name: "The Lunatic",
+    baseHp: 10,
+    cooldownAbilityIds: ["dash", "burst", "decoy"],
+    abilities: {
+      dash: { key: "q", label: "Steer left", cooldown: 0, minCooldown: 0 },
+      burst: { key: "w", label: "Sprint / Stop", cooldown: 0, minCooldown: 0, duration: 0 },
+      decoy: { key: "e", label: "Steer right", cooldown: 0, minCooldown: 0 },
+      random: { key: "r", label: "Roar" },
+    },
+  },
 };
+
+/** Lunatic passive: HP/sec (hearts set bonus uses 0.3 at threshold). */
+export const LUNATIC_PASSIVE_HP_PER_SEC = 0.28;
+/** Stumble walk speed vs normal walk (also sprint speed at momentum 0). */
+export const LUNATIC_STUMBLE_MOVE_MULT = 0.66;
+/** Separate 4s gates: after starting sprint, Stop is locked; after stopping sprint, Start sprint is locked. */
+export const LUNATIC_W_TOGGLE_COOLDOWN_SEC = 4;
+/** Sprint speed ramps from stumble pace to peak over this many seconds. */
+export const LUNATIC_SPRINT_MOMENTUM_RAMP_SEC = 8;
+/** Sprint peak move speed multiplier vs normal walk (ramp ends here). */
+export const LUNATIC_SPRINT_PEAK_SPEED_MULT = 1.845;
+export const LUNATIC_DECEL_SEC = 0.3;
+/** Sprint time (s) at which stop-deceleration reaches full `LUNATIC_DECEL_SEC` (linear from 0s sprint → 0 decel). */
+export const LUNATIC_DECEL_SPRINT_REF_SEC = 5;
+export const LUNATIC_CRASH_STUN_SEC = 0.3;
+/** Terrain crash damage vs seconds since sprint started: ≤ first → tier1, ≤ second → tier2, else tier3. */
+export const LUNATIC_CRASH_DAMAGE_BRACKET_1_SEC = 2;
+export const LUNATIC_CRASH_DAMAGE_BRACKET_2_SEC = 4;
+export const LUNATIC_CRASH_DAMAGE_TIER_1 = 1;
+export const LUNATIC_CRASH_DAMAGE_TIER_2 = 2;
+export const LUNATIC_CRASH_DAMAGE_TIER_3 = 3;
+/** Sprint tier speed-line burst duration (seconds) after crossing 2s / 4s damage brackets. */
+export const LUNATIC_SPRINT_TIER_FX_DUR_T2 = 0.38;
+export const LUNATIC_SPRINT_TIER_FX_DUR_T4 = 0.52;
+/** Minimum turning radius while sprinting (px); yaw rate ω ≈ speed/this, capped below. */
+export const LUNATIC_TURN_RADIUS_PX = 168;
+/** Upper cap on sprint yaw (rad/s) so decel / low speed still steers. */
+export const LUNATIC_STEER_MAX_RAD_PER_SEC = 2.35;
+export const LUNATIC_ROAR_COOLDOWN_SEC = 30;
+export const LUNATIC_ROAR_DURATION_SEC = 1;
+/** Extra speed multiplier while Roar is active (multiplies sprint speed). */
+export const LUNATIC_ROAR_SPEED_MULT = 1.12;
+export const LUNATIC_ROAR_TERRAIN_DAMAGE_INTERVAL_SEC = 0.1;
+export const LUNATIC_ROAR_TERRAIN_DAMAGE = 3;
 
 export const HEX_SIZE = TILE_W * 1.15;
 export const SQRT3 = Math.sqrt(3);
