@@ -80,6 +80,13 @@ const KNIGHT_DIAMOND_BURST_SPEED_MULT = 2.6;
 const KNIGHT_DIAMOND_BURST_DURATION_BONUS_SEC = 1.5;
 /** From this many seconds, waves can include `airSpawner` and `laserBlue` elites. */
 const LATE_GAME_ELITE_SPAWN_SEC = 180;
+/** After this many seconds, every `MIDGAME_ESCALATION_INTERVAL_SEC` adds +5% enemy speed (compounding) and +1 spawn per wave. */
+const MIDGAME_ESCALATION_START_SEC = 240;
+const MIDGAME_ESCALATION_INTERVAL_SEC = 15;
+const MIDGAME_ESCALATION_SPEED_FACTOR = 1.05;
+const BASE_WAVE_SPAWN_JOBS = 14;
+/** Flying spawner chase speed (includes ~5% buff over original 84). */
+const AIR_SPAWNER_CHASE_SPEED = 84 * 1.05;
 /** Blue laser: time between full shot cycles (slightly longer than red). */
 const LASER_BLUE_COOLDOWN_SEC = 1.22;
 /** Blue laser: shorter warning = faster shot after aim (repositions quicker). */
@@ -1434,18 +1441,24 @@ function lineIntersectsRect(x1, y1, x2, y2, rect) {
   return false;
 }
 
-function hasLineOfSight(from, target) {
+function hasLineOfSight(from, target, opts = {}) {
+  const ignoreObstacles = !!opts.ignoreObstacles;
   if (segmentIntersectsSmoke(from.x, from.y, target.x, target.y)) return false;
-  for (const obstacle of obstacles) {
-    if (lineIntersectsRect(from.x, from.y, target.x, target.y, obstacle)) return false;
+  if (!ignoreObstacles) {
+    for (const obstacle of obstacles) {
+      if (lineIntersectsRect(from.x, from.y, target.x, target.y, obstacle)) return false;
+    }
   }
   return true;
 }
 
-function getLaserEndpoint(x, y, dx, dy, maxLen = 900) {
+function getLaserEndpoint(x, y, dx, dy, maxLen = 900, opts = {}) {
   const len = Math.hypot(dx, dy) || 1;
   const ux = dx / len;
   const uy = dy / len;
+  if (opts.throughObstacles) {
+    return { x: x + ux * maxLen, y: y + uy * maxLen };
+  }
   let lastX = x;
   let lastY = y;
   for (let d = 8; d <= maxLen; d += 8) {
@@ -2265,9 +2278,10 @@ function spawnHunter(type, customX, customY) {
     r = 26;
     life = 9;
     lastShotAt = state.elapsed + 999;
-    h.spawnDelayUntil = state.elapsed + 2.1;
+    // Swarms immediately (no charge delay); same active window as ground spawner after its charge.
+    h.spawnDelayUntil = state.elapsed;
     h.spawnActiveUntil = state.elapsed + 9;
-    h.nextSwarmAt = h.spawnDelayUntil;
+    h.nextSwarmAt = state.elapsed;
     h.swarmInterval = 0.62;
     h.swarmN = 5;
     h.fastR = 10;
@@ -2290,6 +2304,18 @@ function spawnHunter(type, customX, customY) {
   h.x = player.x + Math.cos(ang) * d;
   h.y = player.y + Math.sin(ang) * d;
   entities.hunters.push(h);
+}
+
+function midgameEscalationTicks() {
+  if (state.elapsed < MIDGAME_ESCALATION_START_SEC) return 0;
+  return 1 + Math.floor((state.elapsed - MIDGAME_ESCALATION_START_SEC) / MIDGAME_ESCALATION_INTERVAL_SEC);
+}
+
+/** Multiplier on hunter base speeds and similar (chaser dash, ranged shots). */
+function midgameEnemySpeedMult() {
+  const n = midgameEscalationTicks();
+  if (n <= 0) return 1;
+  return Math.pow(MIDGAME_ESCALATION_SPEED_FACTOR, n);
 }
 
 function pickRegularHunterType() {
@@ -2318,7 +2344,7 @@ function hunterRadiusForType(type) {
 
 function scheduleWaveSpawns() {
   const jobs = [];
-  const nJobs = 14;
+  const nJobs = BASE_WAVE_SPAWN_JOBS + midgameEscalationTicks();
   for (let i = 0; i < nJobs; i++) {
     jobs.push(() => {
       const type = pickRegularHunterType();
@@ -2890,10 +2916,10 @@ function moveHunters(dt) {
     if (h.type === "airSpawner") {
       const target = pickTargetForHunter(h);
       const desired = vectorToTarget(h, target);
-      const steer = avoidObstacles(h, desired);
-      const airSpeed = 84;
-      h.dir.x = h.dir.x * 0.72 + steer.x * 0.28;
-      h.dir.y = h.dir.y * 0.72 + steer.y * 0.28;
+      const airSpeed = AIR_SPAWNER_CHASE_SPEED * midgameEnemySpeedMult();
+      // Crow-flies toward target; ignore terrain (no wall avoidance).
+      h.dir.x = h.dir.x * 0.22 + desired.x * 0.78;
+      h.dir.y = h.dir.y * 0.22 + desired.y * 0.78;
       const alen = Math.hypot(h.dir.x, h.dir.y) || 1;
       h.dir.x /= alen;
       h.dir.y /= alen;
@@ -2918,7 +2944,7 @@ function moveHunters(dt) {
             : h.type === "fast"
               ? 150
               : 110;
-    let speed = baseSpeed * speedFactor;
+    let speed = baseSpeed * speedFactor * midgameEnemySpeedMult();
     const rogueInSeekMode = selectedCharacter.id === "rogue" && state.elapsed > state.rogueAlertUntil;
     if (rogueInSeekMode) speed *= 0.58;
 
@@ -2965,7 +2991,7 @@ function moveHunters(dt) {
     } else if (h.type === "laser" || h.type === "laserBlue") {
       const isBlue = h.type === "laserBlue";
       const target = pickTargetForHunter(h);
-      const los = hasLineOfSight(h, target);
+      const los = isBlue ? hasLineOfSight(h, target, { ignoreObstacles: true }) : hasLineOfSight(h, target);
 
       if (h.laserState === "aim") {
         if (state.elapsed >= h.aimStartedAt + h.laserWarning) {
@@ -3001,7 +3027,9 @@ function moveHunters(dt) {
       if (los && state.elapsed >= h.nextLaserReadyAt) {
         const aimDirX = target.x - h.x;
         const aimDirY = target.y - h.y;
-        const endpoint = getLaserEndpoint(h.x, h.y, aimDirX, aimDirY);
+        const endpoint = isBlue
+          ? getLaserEndpoint(h.x, h.y, aimDirX, aimDirY, 900, { throughObstacles: true })
+          : getLaserEndpoint(h.x, h.y, aimDirX, aimDirY);
         h.laserAim = { x1: h.x, y1: h.y, x2: endpoint.x, y2: endpoint.y };
         h.laserState = "aim";
         h.aimStartedAt = state.elapsed;
@@ -3042,7 +3070,7 @@ function moveHunters(dt) {
       }
 
       if (h.chaserDashPhase === "dashing") {
-        const dashSpeed = 405 * speedFactor;
+        const dashSpeed = 405 * speedFactor * midgameEnemySpeedMult();
         const stepLen = Math.min(dashSpeed * spDt, 24);
         const nx = h.x + h.chaserDashDir.x * stepLen;
         const ny = h.y + h.chaserDashDir.y * stepLen;
@@ -3096,7 +3124,7 @@ function updateRangedAttackers(dt) {
     spawnAttackRing(h.x, h.y, h.r + 7, "#fb923c", 0.14);
 
     const to = vectorToTarget(h, target);
-    const speed = h.shotSpeed || 360;
+    const speed = (h.shotSpeed || 360) * midgameEnemySpeedMult();
     entities.projectiles.push({
       x: h.x,
       y: h.y,
@@ -3953,6 +3981,90 @@ function drawRogueFoodBurger(ctx, cx, cy, rr, foodVis, freshness, sense, near) {
   }
 }
 
+/** Laser beam warning + active strike: gradient, glow, layered strokes (red / blue). */
+function drawLaserBeamFancy(ctx, beam) {
+  const x1 = beam.x1;
+  const y1 = beam.y1;
+  const x2 = beam.x2;
+  const y2 = beam.y2;
+  const len = Math.hypot(x2 - x1, y2 - y1) || 1;
+  const ang = Math.atan2(y2 - y1, x2 - x1);
+  const blue = !!beam.blueLaser;
+  const pulse = 0.5 + 0.5 * Math.sin(state.elapsed * (beam.warning ? 26 : 16));
+
+  ctx.save();
+  ctx.translate(x1, y1);
+  ctx.rotate(ang);
+  ctx.lineCap = "round";
+
+  if (beam.warning) {
+    const t = clamp((state.elapsed - beam.bornAt) / Math.max(0.001, beam.expiresAt - beam.bornAt), 0, 1);
+    const fade = 0.42 + 0.48 * (1 - t * 0.4);
+    ctx.shadowBlur = blue ? 20 : 16;
+    ctx.shadowColor = blue ? "rgba(56, 189, 248, 0.75)" : "rgba(248, 113, 113, 0.7)";
+    const gWide = ctx.createLinearGradient(0, 0, len, 0);
+    if (blue) {
+      gWide.addColorStop(0, `rgba(191, 219, 254, ${0.12 * fade})`);
+      gWide.addColorStop(0.35, `rgba(96, 165, 250, ${0.38 * fade + 0.12 * pulse})`);
+      gWide.addColorStop(1, `rgba(30, 64, 175, ${0.35 * fade})`);
+    } else {
+      gWide.addColorStop(0, `rgba(254, 226, 226, ${0.14 * fade})`);
+      gWide.addColorStop(0.35, `rgba(248, 113, 113, ${0.42 * fade + 0.18 * pulse})`);
+      gWide.addColorStop(1, `rgba(127, 29, 29, ${0.38 * fade})`);
+    }
+    ctx.strokeStyle = gWide;
+    ctx.lineWidth = 11 + pulse * 5;
+    ctx.setLineDash([16, 9]);
+    ctx.lineDashOffset = -state.elapsed * 130;
+    ctx.beginPath();
+    ctx.moveTo(0, 0);
+    ctx.lineTo(len, 0);
+    ctx.stroke();
+
+    ctx.strokeStyle = blue
+      ? `rgba(224, 242, 254, ${0.35 + 0.4 * pulse})`
+      : `rgba(254, 249, 239, ${0.38 + 0.42 * pulse})`;
+    ctx.lineWidth = 3.2 + pulse * 1.8;
+    ctx.setLineDash([9, 11]);
+    ctx.lineDashOffset = state.elapsed * 100;
+    ctx.stroke();
+    ctx.setLineDash([]);
+    ctx.shadowBlur = 0;
+  } else {
+    ctx.shadowBlur = blue ? 28 : 24;
+    ctx.shadowColor = blue ? "rgba(56, 189, 248, 0.85)" : "rgba(251, 113, 133, 0.8)";
+    const gBody = ctx.createLinearGradient(0, 0, len, 0);
+    if (blue) {
+      gBody.addColorStop(0, "rgba(224, 231, 255, 0.98)");
+      gBody.addColorStop(0.22, "rgba(96, 165, 250, 0.98)");
+      gBody.addColorStop(0.55, "rgba(37, 99, 235, 0.96)");
+      gBody.addColorStop(1, "rgba(23, 37, 84, 0.9)");
+    } else {
+      gBody.addColorStop(0, "rgba(255, 251, 235, 0.98)");
+      gBody.addColorStop(0.18, "rgba(251, 191, 36, 0.96)");
+      gBody.addColorStop(0.48, "rgba(248, 113, 113, 0.98)");
+      gBody.addColorStop(0.82, "rgba(220, 38, 38, 0.95)");
+      gBody.addColorStop(1, "rgba(88, 28, 28, 0.88)");
+    }
+    ctx.strokeStyle = gBody;
+    ctx.lineWidth = blue ? 9 : 10;
+    ctx.beginPath();
+    ctx.moveTo(0, 0);
+    ctx.lineTo(len, 0);
+    ctx.stroke();
+
+    ctx.shadowBlur = 0;
+    ctx.strokeStyle = blue ? "rgba(255, 255, 255, 0.9)" : "rgba(255, 250, 250, 0.95)";
+    ctx.lineWidth = blue ? 2.4 : 2.6;
+    ctx.beginPath();
+    ctx.moveTo(0, 0);
+    ctx.lineTo(len, 0);
+    ctx.stroke();
+  }
+
+  ctx.restore();
+}
+
 function render(tsMs) {
   const deathElapsed = state.running ? 0 : Math.max(0, (tsMs - state.deathStartedAtMs) / 1000);
   const deathAnimDone = !state.running && deathElapsed >= DEATH_ANIM_DURATION;
@@ -4312,32 +4424,7 @@ function render(tsMs) {
   }
 
   for (const beam of entities.laserBeams) {
-    if (beam.warning) {
-      const t = clamp(
-        (state.elapsed - beam.bornAt) / Math.max(0.001, beam.expiresAt - beam.bornAt),
-        0,
-        1
-      );
-      const pulse = 0.55 + 0.45 * (0.5 + 0.5 * Math.sin(state.elapsed * 30));
-      if (beam.blueLaser) {
-        ctx.strokeStyle = `rgba(96, 165, 250, ${0.38 + 0.52 * pulse})`;
-        ctx.lineWidth = 3 + pulse * 5;
-      } else {
-        ctx.strokeStyle = `rgba(248, 113, 113, ${0.35 + 0.55 * pulse})`;
-        ctx.lineWidth = 3 + pulse * 6;
-      }
-      ctx.setLineDash([18, 10]);
-      ctx.lineDashOffset = -state.elapsed * 140;
-    } else {
-      ctx.strokeStyle = beam.blueLaser ? "rgba(37, 99, 235, 0.95)" : "rgba(239, 68, 68, 0.95)";
-      ctx.lineWidth = beam.blueLaser ? 5.5 : 6;
-      ctx.setLineDash([]);
-    }
-    ctx.beginPath();
-    ctx.moveTo(beam.x1, beam.y1);
-    ctx.lineTo(beam.x2, beam.y2);
-    ctx.stroke();
-    ctx.setLineDash([]);
+    drawLaserBeamFancy(ctx, beam);
   }
 
   // Spawner charging animation: large translucent clock at spawner position.

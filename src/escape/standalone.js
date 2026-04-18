@@ -293,6 +293,11 @@
     const KNIGHT_DIAMOND_BURST_SPEED_MULT = 2.6;
     const KNIGHT_DIAMOND_BURST_DURATION_BONUS_SEC = 1.5;
     const LATE_GAME_ELITE_SPAWN_SEC = 180;
+    const MIDGAME_ESCALATION_START_SEC = 240;
+    const MIDGAME_ESCALATION_INTERVAL_SEC = 15;
+    const MIDGAME_ESCALATION_SPEED_FACTOR = 1.05;
+    const BASE_WAVE_SPAWN_JOBS = 14;
+    const AIR_SPAWNER_CHASE_SPEED = 84 * 1.05;
     const LASER_BLUE_COOLDOWN_SEC = 1.22;
     const LASER_BLUE_WARN_SEC = 0.3;
     const LASER_BLUE_PLAYER_SLOW_MULT = 0.8;
@@ -1120,9 +1125,7 @@
     function cardModalInventoryDragHintHtml() {
       return `<aside class="card-face-hint" aria-label="How to use inventory">
     <strong>Using inventory</strong>
-    <p><strong>Click and hold</strong> a card, then <strong>drag</strong> it to a slot and <strong>release</strong> to drop.</p>
-    <p>Put this pickup on its <strong>matching rank</strong> in the deck row above, into a <strong>backpack</strong> pack, or swap with the <strong>New pickup</strong> / <strong>Card slot</strong> areas below.</p>
-    <p><strong>Leave</strong> closes the window (an unplaced pickup is discarded).</p>
+    <p><strong>Click and hold</strong> a card, then <b>drag</b> it to a slot and <b>release</b> to drop, either in the relevant card slot, or the <b>backpack</b>. Cards in the backpack have no effect but are stored for later.</p>
   </aside>`;
     }
     function renderCardModal() {
@@ -1452,17 +1455,23 @@
       }
       return false;
     }
-    function hasLineOfSight(from, target) {
+    function hasLineOfSight(from, target, opts = {}) {
+      const ignoreObstacles = !!opts.ignoreObstacles;
       if (segmentIntersectsSmoke(from.x, from.y, target.x, target.y)) return false;
-      for (const obstacle of obstacles) {
-        if (lineIntersectsRect2(from.x, from.y, target.x, target.y, obstacle)) return false;
+      if (!ignoreObstacles) {
+        for (const obstacle of obstacles) {
+          if (lineIntersectsRect2(from.x, from.y, target.x, target.y, obstacle)) return false;
+        }
       }
       return true;
     }
-    function getLaserEndpoint(x, y, dx, dy, maxLen = 900) {
+    function getLaserEndpoint(x, y, dx, dy, maxLen = 900, opts = {}) {
       const len = Math.hypot(dx, dy) || 1;
       const ux = dx / len;
       const uy = dy / len;
+      if (opts.throughObstacles) {
+        return { x: x + ux * maxLen, y: y + uy * maxLen };
+      }
       let lastX = x;
       let lastY = y;
       for (let d = 8; d <= maxLen; d += 8) {
@@ -2211,9 +2220,9 @@
         r = 26;
         life = 9;
         lastShotAt = state.elapsed + 999;
-        h.spawnDelayUntil = state.elapsed + 2.1;
+        h.spawnDelayUntil = state.elapsed;
         h.spawnActiveUntil = state.elapsed + 9;
-        h.nextSwarmAt = h.spawnDelayUntil;
+        h.nextSwarmAt = state.elapsed;
         h.swarmInterval = 0.62;
         h.swarmN = 5;
         h.fastR = 10;
@@ -2233,6 +2242,15 @@
       h.x = player.x + Math.cos(ang) * d;
       h.y = player.y + Math.sin(ang) * d;
       entities.hunters.push(h);
+    }
+    function midgameEscalationTicks() {
+      if (state.elapsed < MIDGAME_ESCALATION_START_SEC) return 0;
+      return 1 + Math.floor((state.elapsed - MIDGAME_ESCALATION_START_SEC) / MIDGAME_ESCALATION_INTERVAL_SEC);
+    }
+    function midgameEnemySpeedMult() {
+      const n = midgameEscalationTicks();
+      if (n <= 0) return 1;
+      return Math.pow(MIDGAME_ESCALATION_SPEED_FACTOR, n);
     }
     function pickRegularHunterType() {
       if (state.elapsed >= LATE_GAME_ELITE_SPAWN_SEC) {
@@ -2258,7 +2276,7 @@
     }
     function scheduleWaveSpawns() {
       const jobs = [];
-      const nJobs = 14;
+      const nJobs = BASE_WAVE_SPAWN_JOBS + midgameEscalationTicks();
       for (let i = 0; i < nJobs; i++) {
         jobs.push(() => {
           const type = pickRegularHunterType();
@@ -2777,10 +2795,9 @@
         if (h.type === "airSpawner") {
           const target = pickTargetForHunter(h);
           const desired2 = vectorToTarget(h, target);
-          const steer2 = avoidObstacles(h, desired2);
-          const airSpeed = 84;
-          h.dir.x = h.dir.x * 0.72 + steer2.x * 0.28;
-          h.dir.y = h.dir.y * 0.72 + steer2.y * 0.28;
+          const airSpeed = AIR_SPAWNER_CHASE_SPEED * midgameEnemySpeedMult();
+          h.dir.x = h.dir.x * 0.22 + desired2.x * 0.78;
+          h.dir.y = h.dir.y * 0.22 + desired2.y * 0.78;
           const alen = Math.hypot(h.dir.x, h.dir.y) || 1;
           h.dir.x /= alen;
           h.dir.y /= alen;
@@ -2791,7 +2808,7 @@
         const age = clamp((state.elapsed - h.bornAt) / lifeSpan, 0, 1);
         const speedFactor = 1 + age * HUNTER_SPEED_AGE_COEFF;
         const baseSpeed = h.type === "sniper" ? 100 : h.type === "cutter" ? 116 : h.type === "laser" || h.type === "laserBlue" ? h.type === "laserBlue" ? 156 : 138 : h.type === "ranged" ? 85 : h.type === "fast" ? 150 : 110;
-        let speed = baseSpeed * speedFactor;
+        let speed = baseSpeed * speedFactor * midgameEnemySpeedMult();
         const rogueInSeekMode = selectedCharacter.id === "rogue" && state.elapsed > state.rogueAlertUntil;
         if (rogueInSeekMode) speed *= 0.58;
         if (selectedCharacter.id === "rogue" && state.rogueStealthActive) {
@@ -2835,7 +2852,7 @@
         } else if (h.type === "laser" || h.type === "laserBlue") {
           const isBlue = h.type === "laserBlue";
           const target = pickTargetForHunter(h);
-          const los = hasLineOfSight(h, target);
+          const los = isBlue ? hasLineOfSight(h, target, { ignoreObstacles: true }) : hasLineOfSight(h, target);
           if (h.laserState === "aim") {
             if (state.elapsed >= h.aimStartedAt + h.laserWarning) {
               const aim = h.laserAim;
@@ -2869,7 +2886,7 @@
           if (los && state.elapsed >= h.nextLaserReadyAt) {
             const aimDirX = target.x - h.x;
             const aimDirY = target.y - h.y;
-            const endpoint = getLaserEndpoint(h.x, h.y, aimDirX, aimDirY);
+            const endpoint = isBlue ? getLaserEndpoint(h.x, h.y, aimDirX, aimDirY, 900, { throughObstacles: true }) : getLaserEndpoint(h.x, h.y, aimDirX, aimDirY);
             h.laserAim = { x1: h.x, y1: h.y, x2: endpoint.x, y2: endpoint.y };
             h.laserState = "aim";
             h.aimStartedAt = state.elapsed;
@@ -2907,7 +2924,7 @@
             }
           }
           if (h.chaserDashPhase === "dashing") {
-            const dashSpeed = 405 * speedFactor;
+            const dashSpeed = 405 * speedFactor * midgameEnemySpeedMult();
             const stepLen = Math.min(dashSpeed * spDt, 24);
             const nx = h.x + h.chaserDashDir.x * stepLen;
             const ny = h.y + h.chaserDashDir.y * stepLen;
@@ -2958,7 +2975,7 @@
         h.lastShotAt = state.elapsed;
         spawnAttackRing(h.x, h.y, h.r + 7, "#fb923c", 0.14);
         const to = vectorToTarget(h, target);
-        const speed = h.shotSpeed || 360;
+        const speed = (h.shotSpeed || 360) * midgameEnemySpeedMult();
         entities.projectiles.push({
           x: h.x,
           y: h.y,
@@ -3707,6 +3724,81 @@
         ctx2.stroke();
       }
     }
+    function drawLaserBeamFancy(ctx2, beam) {
+      const x1 = beam.x1;
+      const y1 = beam.y1;
+      const x2 = beam.x2;
+      const y2 = beam.y2;
+      const len = Math.hypot(x2 - x1, y2 - y1) || 1;
+      const ang = Math.atan2(y2 - y1, x2 - x1);
+      const blue = !!beam.blueLaser;
+      const pulse = 0.5 + 0.5 * Math.sin(state.elapsed * (beam.warning ? 26 : 16));
+      ctx2.save();
+      ctx2.translate(x1, y1);
+      ctx2.rotate(ang);
+      ctx2.lineCap = "round";
+      if (beam.warning) {
+        const t = clamp((state.elapsed - beam.bornAt) / Math.max(1e-3, beam.expiresAt - beam.bornAt), 0, 1);
+        const fade = 0.42 + 0.48 * (1 - t * 0.4);
+        ctx2.shadowBlur = blue ? 20 : 16;
+        ctx2.shadowColor = blue ? "rgba(56, 189, 248, 0.75)" : "rgba(248, 113, 113, 0.7)";
+        const gWide = ctx2.createLinearGradient(0, 0, len, 0);
+        if (blue) {
+          gWide.addColorStop(0, `rgba(191, 219, 254, ${0.12 * fade})`);
+          gWide.addColorStop(0.35, `rgba(96, 165, 250, ${0.38 * fade + 0.12 * pulse})`);
+          gWide.addColorStop(1, `rgba(30, 64, 175, ${0.35 * fade})`);
+        } else {
+          gWide.addColorStop(0, `rgba(254, 226, 226, ${0.14 * fade})`);
+          gWide.addColorStop(0.35, `rgba(248, 113, 113, ${0.42 * fade + 0.18 * pulse})`);
+          gWide.addColorStop(1, `rgba(127, 29, 29, ${0.38 * fade})`);
+        }
+        ctx2.strokeStyle = gWide;
+        ctx2.lineWidth = 11 + pulse * 5;
+        ctx2.setLineDash([16, 9]);
+        ctx2.lineDashOffset = -state.elapsed * 130;
+        ctx2.beginPath();
+        ctx2.moveTo(0, 0);
+        ctx2.lineTo(len, 0);
+        ctx2.stroke();
+        ctx2.strokeStyle = blue ? `rgba(224, 242, 254, ${0.35 + 0.4 * pulse})` : `rgba(254, 249, 239, ${0.38 + 0.42 * pulse})`;
+        ctx2.lineWidth = 3.2 + pulse * 1.8;
+        ctx2.setLineDash([9, 11]);
+        ctx2.lineDashOffset = state.elapsed * 100;
+        ctx2.stroke();
+        ctx2.setLineDash([]);
+        ctx2.shadowBlur = 0;
+      } else {
+        ctx2.shadowBlur = blue ? 28 : 24;
+        ctx2.shadowColor = blue ? "rgba(56, 189, 248, 0.85)" : "rgba(251, 113, 133, 0.8)";
+        const gBody = ctx2.createLinearGradient(0, 0, len, 0);
+        if (blue) {
+          gBody.addColorStop(0, "rgba(224, 231, 255, 0.98)");
+          gBody.addColorStop(0.22, "rgba(96, 165, 250, 0.98)");
+          gBody.addColorStop(0.55, "rgba(37, 99, 235, 0.96)");
+          gBody.addColorStop(1, "rgba(23, 37, 84, 0.9)");
+        } else {
+          gBody.addColorStop(0, "rgba(255, 251, 235, 0.98)");
+          gBody.addColorStop(0.18, "rgba(251, 191, 36, 0.96)");
+          gBody.addColorStop(0.48, "rgba(248, 113, 113, 0.98)");
+          gBody.addColorStop(0.82, "rgba(220, 38, 38, 0.95)");
+          gBody.addColorStop(1, "rgba(88, 28, 28, 0.88)");
+        }
+        ctx2.strokeStyle = gBody;
+        ctx2.lineWidth = blue ? 9 : 10;
+        ctx2.beginPath();
+        ctx2.moveTo(0, 0);
+        ctx2.lineTo(len, 0);
+        ctx2.stroke();
+        ctx2.shadowBlur = 0;
+        ctx2.strokeStyle = blue ? "rgba(255, 255, 255, 0.9)" : "rgba(255, 250, 250, 0.95)";
+        ctx2.lineWidth = blue ? 2.4 : 2.6;
+        ctx2.beginPath();
+        ctx2.moveTo(0, 0);
+        ctx2.lineTo(len, 0);
+        ctx2.stroke();
+      }
+      ctx2.restore();
+    }
     function render(tsMs) {
       const deathElapsed = state.running ? 0 : Math.max(0, (tsMs - state.deathStartedAtMs) / 1e3);
       const deathAnimDone = !state.running && deathElapsed >= DEATH_ANIM_DURATION;
@@ -4042,32 +4134,7 @@
         ctx.stroke();
       }
       for (const beam of entities.laserBeams) {
-        if (beam.warning) {
-          const t = clamp(
-            (state.elapsed - beam.bornAt) / Math.max(1e-3, beam.expiresAt - beam.bornAt),
-            0,
-            1
-          );
-          const pulse = 0.55 + 0.45 * (0.5 + 0.5 * Math.sin(state.elapsed * 30));
-          if (beam.blueLaser) {
-            ctx.strokeStyle = `rgba(96, 165, 250, ${0.38 + 0.52 * pulse})`;
-            ctx.lineWidth = 3 + pulse * 5;
-          } else {
-            ctx.strokeStyle = `rgba(248, 113, 113, ${0.35 + 0.55 * pulse})`;
-            ctx.lineWidth = 3 + pulse * 6;
-          }
-          ctx.setLineDash([18, 10]);
-          ctx.lineDashOffset = -state.elapsed * 140;
-        } else {
-          ctx.strokeStyle = beam.blueLaser ? "rgba(37, 99, 235, 0.95)" : "rgba(239, 68, 68, 0.95)";
-          ctx.lineWidth = beam.blueLaser ? 5.5 : 6;
-          ctx.setLineDash([]);
-        }
-        ctx.beginPath();
-        ctx.moveTo(beam.x1, beam.y1);
-        ctx.lineTo(beam.x2, beam.y2);
-        ctx.stroke();
-        ctx.setLineDash([]);
+        drawLaserBeamFancy(ctx, beam);
       }
       for (const h of entities.hunters) {
         if (h.type !== "spawner" && h.type !== "airSpawner") continue;
