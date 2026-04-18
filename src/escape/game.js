@@ -22,10 +22,12 @@ export function mountEscape({
   characterSelectModal,
   characterSelectOptions,
   abilitySlots,
-  cardSlotEls,
-  backpackSlotEl,
+  deckRankSlotEls,
+  backpackSlotEls,
   setBonusStatusEl,
+  dangerRampFillEl,
   cardModal,
+  modalDeckStripEl,
   cardModalFace,
   modalSetBonusStatusEl,
   cardCloseButton,
@@ -62,6 +64,32 @@ const LOOT_DENSITY_BASE_ACTIVE_HEXES = 3;
 const TERRAIN_SPEED_BOOST_LINGER = 0.16;
 const ROGUE_STEALTH_AFTER_LOS_BREAK = 0.35;
 const ROGUE_STEALTH_OPEN_GRACE = 0.4;
+/** Knight Spades set bonus: after using R (ultimate), non-player simulation uses this `dt` multiplier for this many seconds. */
+const KNIGHT_SPADES_WORLD_SLOW_MULT = 0.3;
+const KNIGHT_SPADES_WORLD_SLOW_SEC = 2;
+
+/** Hunter wave spacing at run start (seconds until next wave after scheduling). */
+const SPAWN_INTERVAL_START = 8;
+/** Minimum seconds between hunter spawn waves once danger ramp is full (was 1.8). */
+const SPAWN_INTERVAL_FLOOR = 1.5;
+/** Survival time over which wave spacing eases from START → FLOOR (matches danger bar). */
+const DANGER_RAMP_SECONDS = 300;
+/** Hunter `speedFactor` uses `1 + age * coeff` over each hunter's lifetime; was 0.9 (+0.9 max); +0.2 → 1.1 (+1.1 max). */
+const HUNTER_SPEED_AGE_COEFF = 1.1;
+/** Matching suit cards in the rank deck required to unlock that suit's set bonus. */
+const SET_BONUS_SUIT_THRESHOLD = 7;
+/** Card pickup: spawn weight at rank 2 vs King (linear in between); doubles prior 12:1 curve. */
+const CARD_RANK_SPAWN_WEIGHT_MAX = 24;
+const CARD_RANK_SPAWN_WEIGHT_MIN = 1;
+/** Ultimate (R): cooldown after any ult use. */
+const ULTIMATE_ABILITY_COOLDOWN_SEC = 20;
+/** Push ult: radius per wave (was 140; doubled). */
+const ULT_BURST_RADIUS = 280;
+const ULT_BURST_WAVE_COUNT = 5;
+const ULT_BURST_WAVE_SPAN_SEC = 2;
+/** Orbiting ult shields: distance from player center (slightly farther than old single orbiter). */
+const ULT_ORBIT_SHIELD_RADIUS_EXTRA = 36;
+const ULT_ORBIT_SHIELD_STAGGER_SEC = 4;
 /** Food sets hunger to at least this many seconds (cap stays rogueHungerMax). */
 const ROGUE_FOOD_HUNGER_RESTORE = 30;
 /** Seconds food stays on the map before expiring. */
@@ -227,7 +255,11 @@ const state = {
   playerTimelockUntil: 0,
   tempHp: 0,
   tempHpExpiry: 0,
-  ultimatePushbackReadyAt: 0,
+  ultimateBurstWaves: [],
+  timelockEnemyFrom: 0,
+  timelockEnemyUntil: 0,
+  /** One-shot extra screen shake when timelock world phase begins. */
+  timelockWorldShakeAt: 0,
   screenShakeUntil: 0,
   screenShakeStrength: 0,
   deathStartedAtMs: 0,
@@ -236,8 +268,14 @@ const state = {
   inventoryModalOpen: false,
   waitingForMovementResume: false,
   pendingCard: null,
+  /** True after touching a map card until modal closes; keeps pickup UI visible even when pending is empty. */
+  cardPickupFlowActive: false,
+  /** Rank (1–13) for this pickup session; bottom row shows one interactive slot for this rank. */
+  pickupTargetRank: null,
   setBonusChoicePendingSuit: null,
   setBonusChoiceCard: null,
+  /** Knight + Spades set: `elapsed` until ult-triggered world slow ends. */
+  knightSpadesWorldSlowUntil: 0,
   playerHeadstartUntil: 0,
   rogueHunger: 60,
   rogueHungerMax: 60,
@@ -262,7 +300,7 @@ function makeAbilitiesForCharacter(character) {
     dash: { ...spec.dash, nextReadyAt: 0 },
     burst: { ...spec.burst, nextReadyAt: 0 },
     decoy: { ...spec.decoy, nextReadyAt: 0 },
-    random: { ...spec.random, type: null, ammo: 0, maxAmmo: 0 },
+    random: { ...spec.random, type: null, ammo: 0, maxAmmo: 0, nextReadyAt: 0 },
   };
 }
 
@@ -298,9 +336,15 @@ const entities = {
   foods: [],
 };
 
+/** 14-length array: index 1..13 = card at that rank, or null. */
+function makeEmptyDeckByRank() {
+  const a = new Array(14).fill(null);
+  return a;
+}
+
 const inventory = {
-  cards: [],
-  backpackCard: null,
+  deckByRank: makeEmptyDeckByRank(),
+  backpackSlots: [null, null, null],
   diamondEmpower: null,
   heartsRegenPerSec: 0,
   spadesLandingStealthUntil: 0,
@@ -334,6 +378,8 @@ const dashState = {
 
 const suitGlyph = { diamonds: "♦", hearts: "♥", clubs: "♣", spades: "♠" };
 let gameStarted = false;
+/** After death, R runs `resetGame` then this (modal: reopen pick; no modal: set `gameStarted` true). */
+let afterDeathRetry = () => {};
 
 function cardRankText(rank) {
   if (rank === 1) return "A";
@@ -347,13 +393,45 @@ function formatCardName(card) {
   return `${cardRankText(card.rank)}${suitGlyph[card.suit] ?? "?"}`;
 }
 
-function randomSuitForDraw() {
-  const counts = { diamonds: 0, hearts: 0, clubs: 0, spades: 0 };
-  for (const card of inventory.cards) counts[card.suit] += 1;
-  const lockedSuit = Object.keys(counts).find((s) => counts[s] >= 2);
-  if (lockedSuit) return lockedSuit;
-  const suits = ["diamonds", "hearts", "clubs", "spades"];
-  return suits[Math.floor(Math.random() * suits.length)];
+/** Canonical identity for the 52-card pool (rank 1 = Ace, 13 = King). */
+function deckKey(suit, rank) {
+  return `${suit}:${rank}`;
+}
+
+/**
+ * Spawn weight by rank: 2 is most common; linear down to King (min weight).
+ * Rank 2 vs King ratio is CARD_RANK_SPAWN_WEIGHT_MAX : CARD_RANK_SPAWN_WEIGHT_MIN (e.g. 24× rarer).
+ * Ace (1) uses the same weight as 9.
+ */
+function cardRankSpawnWeight(rank) {
+  if (rank === 1) return cardRankSpawnWeight(9);
+  if (rank >= 2 && rank <= 13) {
+    const span = 11;
+    const t = (rank - 2) / span;
+    return CARD_RANK_SPAWN_WEIGHT_MAX - t * (CARD_RANK_SPAWN_WEIGHT_MAX - CARD_RANK_SPAWN_WEIGHT_MIN);
+  }
+  return CARD_RANK_SPAWN_WEIGHT_MIN;
+}
+
+function addReservedDeckKey(card, reserved) {
+  if (card?.suit != null && Number.isInteger(card.rank)) reserved.add(deckKey(card.suit, card.rank));
+}
+
+/** Cards held, pending pickup UI, or still on the ground — excluded from the next spawn. */
+function getReservedDeckKeys() {
+  const reserved = new Set();
+  addReservedDeckKey(state.pendingCard, reserved);
+  for (let r = 1; r <= 13; r++) addReservedDeckKey(inventory.deckByRank[r], reserved);
+  for (const c of inventory.backpackSlots) addReservedDeckKey(c, reserved);
+  for (const ec of entities.cards) addReservedDeckKey(ec.card, reserved);
+  return reserved;
+}
+
+function forEachDeckCard(fn) {
+  for (let r = 1; r <= 13; r++) {
+    const c = inventory.deckByRank[r];
+    if (c) fn(c, r);
+  }
 }
 
 function rogueDiamondCooldownPctForRank(rank) {
@@ -372,6 +450,10 @@ function abilityLabelById(id) {
 }
 
 function makeCardEffect(suit, rank) {
+  if (rank === 1) {
+    const pool = ["shield", "burst", "timelock", "heal"];
+    return { kind: "ultimate", ultType: pool[Math.floor(Math.random() * pool.length)] };
+  }
   if (suit === "diamonds") {
     const abilityPool = selectedCharacter.cooldownAbilityIds;
     const target = abilityPool[Math.floor(Math.random() * abilityPool.length)];
@@ -397,28 +479,52 @@ function makeCardEffect(suit, rank) {
   return { kind: "terrainBoost", value: Math.min(0.36, 0.036 * rank) };
 }
 
-/**
- * Weighted 1..13 roll where A(1) is 5x as likely as K(13),
- * with linear interpolation for ranks in between.
- */
-function rollCardRankWeighted() {
-  const minW = 0.2; // King weight
-  const maxW = 1.0; // Ace weight
-  const steps = 12;
-  const totalW = ((maxW + minW) * 13) / 2;
-  let pick = Math.random() * totalW;
-  for (let rank = 1; rank <= 13; rank++) {
-    const t = (rank - 1) / steps;
-    const w = maxW + (minW - maxW) * t;
-    pick -= w;
-    if (pick <= 0) return rank;
-  }
-  return 13;
-}
-
 function makeRandomCard() {
-  const suit = randomSuitForDraw();
-  const rank = rollCardRankWeighted();
+  const reserved = getReservedDeckKeys();
+  const suits = ["diamonds", "hearts", "clubs", "spades"];
+  const candidates = [];
+  for (const suit of suits) {
+    for (let rank = 1; rank <= 13; rank++) {
+      if (reserved.has(deckKey(suit, rank))) continue;
+      candidates.push({ suit, rank, w: cardRankSpawnWeight(rank) });
+    }
+  }
+
+  let suit;
+  let rank;
+  if (!candidates.length) {
+    let found = null;
+    outer: for (const s of suits) {
+      for (let r = 1; r <= 13; r++) {
+        if (!reserved.has(deckKey(s, r))) {
+          found = { suit: s, rank: r };
+          break outer;
+        }
+      }
+    }
+    if (!found) {
+      suit = "hearts";
+      rank = 2;
+    } else {
+      suit = found.suit;
+      rank = found.rank;
+    }
+  } else {
+    let total = 0;
+    for (const c of candidates) total += c.w;
+    let pick = Math.random() * total;
+    let chosen = candidates[candidates.length - 1];
+    for (const c of candidates) {
+      pick -= c.w;
+      if (pick <= 0) {
+        chosen = c;
+        break;
+      }
+    }
+    suit = chosen.suit;
+    rank = chosen.rank;
+  }
+
   return {
     id: `${Date.now()}-${Math.floor(Math.random() * 1e6)}`,
     suit,
@@ -429,6 +535,10 @@ function makeRandomCard() {
 
 function describeCardEffect(card) {
   const e = card.effect;
+  if (e.kind === "ultimate") {
+    const names = { shield: "Orbiting shields", burst: "Push waves", timelock: "Timelock", heal: "Vitality (temp HP)" };
+    return `Ultimate — ${names[e.ultType] ?? e.ultType}`;
+  }
   if (e.kind === "cooldown") return `-${e.value.toFixed(1)}s ${abilityLabelById(e.target)} cooldown`;
   if (e.kind === "cooldownPct") return `-${Math.round(e.value * 100)}% ${abilityLabelById(e.target)} cooldown`;
   if (e.kind === "maxHp") return `+${e.value} max HP`;
@@ -443,28 +553,69 @@ function describeCardEffect(card) {
   return "Passive effect";
 }
 
+function fillDeckSlotEl(el, rank, card) {
+  if (!el) return;
+  for (const c of CARD_SET_GLOW_CLASSES) el.classList.remove(c);
+  el.classList.toggle("filled", !!card);
+  el.dataset.rank = String(rank);
+  if (!card) {
+    el.innerHTML = `<span class="deck-rank-label">${cardRankText(rank)}</span><span class="deck-slot-empty">—</span>`;
+    return;
+  }
+  const glow = suitInventoryGlowClass(card);
+  if (glow) el.classList.add(glow);
+  el.innerHTML = `<span class="deck-rank-label">${cardRankText(rank)}</span><div><span class="title">${formatCardName(
+    card
+  )}</span><span class="meta">${describeCardEffect(card)}</span></div>`;
+}
+
 function renderCardSlots() {
-  if (!cardSlotEls) return;
-  for (let i = 0; i < Math.min(3, cardSlotEls.length); i++) {
-    const slot = cardSlotEls[i];
-    const card = inventory.cards[i];
-    slot.classList.toggle("filled", !!card);
-    if (!card) {
-      slot.innerHTML = "Empty Slot";
-      continue;
-    }
-    slot.innerHTML = `<div><span class="title">${formatCardName(card)}</span><span class="meta">${describeCardEffect(card)}</span></div>`;
-  }
-  if (backpackSlotEl) {
-    backpackSlotEl.classList.toggle("filled", !!inventory.backpackCard);
-    if (!inventory.backpackCard) {
-      backpackSlotEl.innerHTML = "Backpack Empty";
-    } else {
-      backpackSlotEl.innerHTML = `<div><span class="title">Backpack: ${formatCardName(
-        inventory.backpackCard
-      )}</span><span class="meta">${describeCardEffect(inventory.backpackCard)}</span></div>`;
+  if (deckRankSlotEls && deckRankSlotEls.length) {
+    for (let r = 1; r <= 13; r++) {
+      const el = deckRankSlotEls[r - 1];
+      fillDeckSlotEl(el, r, inventory.deckByRank[r] || null);
     }
   }
+  if (backpackSlotEls && backpackSlotEls.length) {
+    for (let i = 0; i < 3; i++) {
+      const slot = backpackSlotEls[i];
+      if (!slot) continue;
+      const card = inventory.backpackSlots[i] || null;
+      for (const c of CARD_SET_GLOW_CLASSES) slot.classList.remove(c);
+      slot.classList.toggle("filled", !!card);
+      slot.dataset.bpIdx = String(i);
+      if (!card) {
+        slot.innerHTML = `Pack ${i + 1}<span class="deck-slot-empty">Empty</span>`;
+        continue;
+      }
+      const glow = suitInventoryGlowClass(card);
+      if (glow) slot.classList.add(glow);
+      slot.innerHTML = `<span class="deck-rank-label">Pack ${i + 1}</span><div><span class="title">${formatCardName(
+        card
+      )}</span><span class="meta">${describeCardEffect(card)}</span></div>`;
+    }
+  }
+}
+
+/** R ability: ult type comes from the Ace (rank 1) in the rank deck only. */
+function syncUltimateFromAceDeck() {
+  const ace = inventory.deckByRank[1];
+  const e = ace?.effect;
+  if (!e || e.kind !== "ultimate") {
+    abilities.random.type = null;
+    abilities.random.maxAmmo = 0;
+    abilities.random.ammo = 0;
+    abilities.random.nextReadyAt = 0;
+    entities.shields = [];
+    return;
+  }
+  const ultType = e.ultType;
+  const prevType = abilities.random.type;
+  if (prevType != null && prevType !== ultType) entities.shields = [];
+  abilities.random.type = ultType;
+  abilities.random.maxAmmo = 1;
+  if (state.elapsed >= abilities.random.nextReadyAt) abilities.random.ammo = 1;
+  else abilities.random.ammo = 0;
 }
 
 function recalcCardPassives() {
@@ -482,7 +633,7 @@ function recalcCardPassives() {
   inventory.rogueDiamondRangeBoost = false;
   let maxHpBonus = 0;
   const suits = { diamonds: 0, hearts: 0, clubs: 0, spades: 0 };
-  for (const card of inventory.cards) {
+  forEachDeckCard((card) => {
     suits[card.suit] += 1;
     const e = card.effect;
     if (e.kind === "cooldown") passive.cooldownFlat[e.target] += e.value;
@@ -495,14 +646,21 @@ function recalcCardPassives() {
     else if (e.kind === "terrainBoost") passive.obstacleTouchMult += e.value;
     else if (e.kind === "dashCharge") passive.dashChargesBonus += e.value;
     else if (e.kind === "frontShield") passive.heartsShieldArc += e.arc;
+  });
+  if (suits.hearts >= SET_BONUS_SUIT_THRESHOLD) inventory.heartsRegenPerSec = 0.3;
+  if (suits.clubs >= SET_BONUS_SUIT_THRESHOLD) inventory.clubsPhaseThroughTerrain = true;
+  if (selectedCharacter.id === "rogue" && suits.diamonds >= SET_BONUS_SUIT_THRESHOLD) {
+    inventory.rogueDiamondRangeBoost = true;
   }
-  if (suits.hearts >= 3) inventory.heartsRegenPerSec = 0.3;
-  if (suits.clubs >= 3) inventory.clubsPhaseThroughTerrain = true;
-  if (selectedCharacter.id === "rogue" && suits.diamonds >= 3) inventory.rogueDiamondRangeBoost = true;
-  if (suits.spades >= 3) {
-    // Spades 3-set: brief stealth pulse on stealth landing — see tryDash().
+  if (suits.spades >= SET_BONUS_SUIT_THRESHOLD) {
+    // Spades set: Rogue stealth refresh on dash landing — see tryDash(). Knight: ult world slow — see useRandomAbility() + update().
   }
-  if (selectedCharacter.id !== "rogue" && suits.diamonds >= 3 && !inventory.diamondEmpower && !state.setBonusChoicePendingSuit) {
+  if (
+    selectedCharacter.id !== "rogue" &&
+    suits.diamonds >= SET_BONUS_SUIT_THRESHOLD &&
+    !inventory.diamondEmpower &&
+    !state.setBonusChoicePendingSuit
+  ) {
     state.setBonusChoicePendingSuit = "diamonds";
   }
   dashState.maxCharges = 1 + passive.dashChargesBonus;
@@ -510,6 +668,7 @@ function recalcCardPassives() {
   player.maxHp = Math.max(1, selectedCharacter.baseHp + maxHpBonus);
   player.hp = Math.min(player.hp, player.maxHp);
   renderCardSlots();
+  syncUltimateFromAceDeck();
   updateSetBonusStatus();
 }
 
@@ -526,9 +685,11 @@ function updateSetBonusStatus() {
 
 function getSetBonusLines() {
   const suits = { diamonds: 0, hearts: 0, clubs: 0, spades: 0 };
-  for (const card of inventory.cards) suits[card.suit] += 1;
+  forEachDeckCard((card) => {
+    suits[card.suit] += 1;
+  });
   const lines = [];
-  if (suits.diamonds >= 3) {
+  if (suits.diamonds >= SET_BONUS_SUIT_THRESHOLD) {
     if (selectedCharacter.id === "rogue") {
       lines.push("Set bonus! Diamonds: dash range and smoke radius increased.");
     } else {
@@ -543,86 +704,313 @@ function getSetBonusLines() {
     lines.push(`Set bonus! Diamonds: ${pick}.`);
     }
   }
-  if (suits.hearts >= 3) lines.push("Set bonus! Hearts: passive HP regeneration.");
-  if (suits.clubs >= 3) {
+  if (suits.hearts >= SET_BONUS_SUIT_THRESHOLD) lines.push("Set bonus! Hearts: passive HP regeneration.");
+  if (suits.clubs >= SET_BONUS_SUIT_THRESHOLD) {
     lines.push(
       selectedCharacter.id === "rogue"
         ? "Set bonus! Clubs: phase through terrain while inside smoke."
         : "Set bonus! Clubs: burst phase-through terrain."
     );
   }
-  if (suits.spades >= 3) {
+  if (suits.spades >= SET_BONUS_SUIT_THRESHOLD) {
     lines.push(
       selectedCharacter.id === "rogue"
         ? "Set bonus! Spades: dash from stealth snaps you back into stealth on landing (extra grace to hug cover)."
-        : "Set bonus! Spades: on stealth landing, brief decoy-style slip (dash while hidden)."
+        : "Set bonus! Spades: using your ultimate (R) slows hunters, shots, and hazards to 30% speed for 2 seconds."
     );
   }
   return lines;
 }
 
+const MODAL_SET_SUIT_ORDER = ["hearts", "diamonds", "clubs", "spades"];
+const CARD_SET_GLOW_CLASSES = [
+  "card-set-glow-red",
+  "card-set-glow-yellow",
+  "card-set-glow-green",
+  "card-set-glow-blue",
+];
+
+function countSuitsAcrossAllStowed() {
+  const suits = { diamonds: 0, hearts: 0, clubs: 0, spades: 0 };
+  const add = (card) => {
+    if (card && card.suit) suits[card.suit] += 1;
+  };
+  add(state.pendingCard);
+  forEachDeckCard((c) => add(c));
+  for (const c of inventory.backpackSlots) add(c);
+  return suits;
+}
+
+/**
+ * Suit highlight across pickup + 13-rank deck + 3 backpack slots (♥♦♣♠ order among suits with 2+ copies):
+ * 1st such suit → red, 2nd → yellow, 3rd → green, 4th → blue.
+ * Only one suit over-represented (4+ of that suit, no other pair): yellow for that stack.
+ */
+function suitInventoryGlowClass(card) {
+  if (!card?.suit) return "";
+  const suits = countSuitsAcrossAllStowed();
+  const n = suits[card.suit];
+  if (n < 2) return "";
+
+  const suitsWithPair = MODAL_SET_SUIT_ORDER.filter((s) => suits[s] >= 2);
+  const idx = suitsWithPair.indexOf(card.suit);
+  if (idx < 0) return "";
+
+  if (suitsWithPair.length === 1 && n >= 4) return "card-set-glow-yellow";
+
+  const glowByPairOrder = [
+    "card-set-glow-red",
+    "card-set-glow-yellow",
+    "card-set-glow-green",
+    "card-set-glow-blue",
+  ];
+  return glowByPairOrder[Math.min(idx, glowByPairOrder.length - 1)];
+}
+
+/** Suit counts in the 13-rank deck only (backpack excluded from set progress). */
+function countSuitsInActiveSlots() {
+  const suits = { diamonds: 0, hearts: 0, clubs: 0, spades: 0 };
+  forEachDeckCard((card) => {
+    if (card?.suit) suits[card.suit] += 1;
+  });
+  return suits;
+}
+
+function suitDisplayNameForModal(suit) {
+  return { diamonds: "Diamonds", hearts: "Hearts", clubs: "Clubs", spades: "Spades" }[suit] ?? suit;
+}
+
+/** Short label for inventory modal: what completing 3-of-suit does (character-aware). */
+function suitSetBonusGoalLabel(suit) {
+  if (suit === "hearts") return "continuous health regen";
+  if (suit === "diamonds") {
+    return selectedCharacter.id === "rogue" ? "larger dash & smoke radius" : "ability empowerment";
+  }
+  if (suit === "clubs") {
+    return selectedCharacter.id === "rogue" ? "phase through terrain in smoke" : "burst phases through terrain";
+  }
+  if (suit === "spades") {
+    return selectedCharacter.id === "rogue"
+      ? "stealth refresh on stealth-dash landing"
+      : "after ultimate: world (except you) at 30% speed for 2s";
+  }
+  return "";
+}
+
+function diamondsActiveSummary() {
+  if (selectedCharacter.id === "rogue") return "larger dash & smoke radius";
+  if (inventory.diamondEmpower === "dash2x") return "dash goes twice as far";
+  if (inventory.diamondEmpower === "speedPassive") return "speed burst is passive";
+  if (inventory.diamondEmpower === "decoyLead") return "decoy drifts, shorter cooldown, longer life";
+  return "choose empowerment below";
+}
+
+/** Per-suit progress lines for the loadout manager (deck only; threshold from SET_BONUS_SUIT_THRESHOLD). */
+function getModalSetBonusProgressLines() {
+  const suits = countSuitsInActiveSlots();
+  const lines = [];
+  const T = SET_BONUS_SUIT_THRESHOLD;
+  for (const suit of MODAL_SET_SUIT_ORDER) {
+    const n = suits[suit];
+    if (n < 1) continue;
+    const name = suitDisplayNameForModal(suit);
+    const goal = suitSetBonusGoalLabel(suit);
+    if (n >= T) {
+      const active =
+        suit === "diamonds" ? diamondsActiveSummary() : suit === "hearts" ? "passive HP regeneration"
+        : suit === "clubs"
+          ? selectedCharacter.id === "rogue"
+            ? "phase through terrain while inside smoke"
+            : "burst phase-through terrain"
+          : selectedCharacter.id === "rogue"
+            ? "stealth refresh on stealth-dash landing"
+            : "after ultimate: 30% world speed for 2s";
+      lines.push(`${name} set bonus ${T}/${T} (${active})`);
+    } else {
+      lines.push(`${name} set bonus ${n}/${T} (${goal})`);
+    }
+  }
+  return lines;
+}
+
+function parseDeckZoneId(zoneId) {
+  const m = /^deck-(\d+)$/.exec(zoneId);
+  if (!m) return null;
+  const r = Number(m[1]);
+  return r >= 1 && r <= 13 ? r : null;
+}
+
+function parseBpZoneId(zoneId) {
+  const m = /^bp-(\d+)$/.exec(zoneId);
+  if (!m) return null;
+  const i = Number(m[1]);
+  return i >= 0 && i < 3 ? i : null;
+}
+
+function wireDropZone(zoneEl, zoneId) {
+  zoneEl.dataset.zoneId = zoneId;
+  zoneEl.addEventListener("dragover", (event) => {
+    event.preventDefault();
+    zoneEl.classList.add("over");
+  });
+  zoneEl.addEventListener("dragleave", () => zoneEl.classList.remove("over"));
+  zoneEl.addEventListener("drop", (event) => {
+    event.preventDefault();
+    zoneEl.classList.remove("over");
+    const from = event.dataTransfer?.getData("text/plain");
+    if (!from) return;
+    swapCardsBetweenZones(from, zoneId);
+  });
+}
+
+function appendCardToZone(zoneEl, zoneId, card, compact) {
+  if (card) {
+    const cardEl = document.createElement("div");
+    cardEl.className = "zone-card";
+    cardEl.draggable = true;
+    const glow = suitInventoryGlowClass(card);
+    if (glow) cardEl.classList.add(glow);
+    cardEl.textContent = compact ? formatCardName(card) : `${formatCardName(card)} — ${describeCardEffect(card)}`;
+    cardEl.addEventListener("dragstart", (event) => {
+      event.dataTransfer?.setData("text/plain", zoneId);
+    });
+    zoneEl.appendChild(cardEl);
+  } else {
+    const emptyEl = document.createElement("div");
+    emptyEl.className = "zone-empty";
+    emptyEl.textContent = "Empty";
+    zoneEl.appendChild(emptyEl);
+  }
+}
+
+/** Read-only cell in the modal deck strip (not a drop target). */
+function appendModalDeckDisplayCell(parent, rank, card, extraClass = "") {
+  const cell = document.createElement("div");
+  cell.className = ["modal-deck-cell", extraClass].filter(Boolean).join(" ");
+  cell.innerHTML = `<div class="modal-deck-cell-label">${cardRankText(rank)}</div>`;
+  if (card) {
+    const t = document.createElement("div");
+    t.className = "modal-deck-cell-card";
+    const glow = suitInventoryGlowClass(card);
+    if (glow) t.classList.add(glow);
+    t.textContent = formatCardName(card);
+    cell.appendChild(t);
+  } else {
+    const e = document.createElement("div");
+    e.className = "modal-deck-cell-empty";
+    e.textContent = "—";
+    cell.appendChild(e);
+  }
+  parent.appendChild(cell);
+}
+
+/** Read-only backpack pack in the modal strip (matches HUD wing). */
+function appendModalBackpackDisplayCell(parent, packIndex, card) {
+  const cell = document.createElement("div");
+  cell.className = "modal-deck-cell modal-deck-cell--bp";
+  cell.innerHTML = `<div class="modal-deck-cell-label">Pack ${packIndex + 1}</div>`;
+  if (card) {
+    const t = document.createElement("div");
+    t.className = "modal-deck-cell-card";
+    const glow = suitInventoryGlowClass(card);
+    if (glow) t.classList.add(glow);
+    t.textContent = formatCardName(card);
+    cell.appendChild(t);
+  } else {
+    const e = document.createElement("div");
+    e.className = "modal-deck-cell-empty";
+    e.textContent = "—";
+    cell.appendChild(e);
+  }
+  parent.appendChild(cell);
+}
+
 function renderCardModal() {
   if (!cardModal || !cardModalFace || !cardSwapRow) return;
+  if (modalDeckStripEl) modalDeckStripEl.innerHTML = "";
   if (!state.inventoryModalOpen) {
     cardModal.classList.remove("open");
     if (modalSetBonusStatusEl) modalSetBonusStatusEl.textContent = "";
-    // Tear down swap UI so no stale drag/drop listeners or half-finished drags survive across runs.
     cardSwapRow.innerHTML = "";
     cardModalFace.classList.remove("compact");
     cardModalFace.innerHTML = "";
+    renderCardSlots();
     return;
   }
   cardModal.classList.add("open");
-  if (state.pendingCard) {
+
+  if (modalDeckStripEl) {
+    const labelRow = document.createElement("div");
+    labelRow.className = "player-deck-label-row";
+    labelRow.innerHTML =
+      '<span class="deck-slots-label">Deck (one card per rank)</span><span class="deck-slots-label deck-slots-label--sub">Backpack (3)</span>';
+    modalDeckStripEl.appendChild(labelRow);
+    const wings = document.createElement("div");
+    wings.className = "modal-deck-wings-grid";
+    wings.setAttribute("aria-label", "Read-only deck and backpack preview");
+    const aceWing = document.createElement("div");
+    aceWing.className = "modal-deck-ace-wing";
+    appendModalDeckDisplayCell(aceWing, 1, inventory.deckByRank[1] || null, "modal-deck-cell--ace");
+    const mid = document.createElement("div");
+    mid.className = "modal-deck-middle-twelve";
+    for (let r = 2; r <= 13; r++) {
+      appendModalDeckDisplayCell(mid, r, inventory.deckByRank[r] || null);
+    }
+    const bpWing = document.createElement("div");
+    bpWing.className = "modal-deck-backpack-wing";
+    for (let i = 0; i < 3; i++) {
+      appendModalBackpackDisplayCell(bpWing, i, inventory.backpackSlots[i] || null);
+    }
+    wings.appendChild(aceWing);
+    wings.appendChild(mid);
+    wings.appendChild(bpWing);
+    modalDeckStripEl.appendChild(wings);
+  }
+
+  if (state.cardPickupFlowActive && state.pickupTargetRank) {
+    const r = state.pickupTargetRank;
+    const showCard = state.pendingCard || inventory.deckByRank[r] || null;
+    if (showCard) {
+      cardModalFace.classList.remove("compact");
+      cardModalFace.innerHTML = `<div class="big">${formatCardName(showCard)}</div><div class="desc">${describeCardEffect(showCard)}</div>`;
+    } else {
+      cardModalFace.classList.add("compact");
+      cardModalFace.innerHTML = `<div class="desc">Rank <strong>${cardRankText(r)}</strong> — empty. Use <strong>New pickup</strong> or a backpack slot below, or <strong>Leave</strong>.</div>`;
+    }
+  } else if (state.pendingCard) {
     const card = state.pendingCard;
     cardModalFace.classList.remove("compact");
     cardModalFace.innerHTML = `<div class="big">${formatCardName(card)}</div><div class="desc">${describeCardEffect(card)}</div>`;
   } else {
     cardModalFace.classList.add("compact");
     cardModalFace.innerHTML =
-      '<div class="desc">Drag cards between Slot 1-3 and Backpack. Press X or Leave when done.</div>';
+      '<div class="desc">Drag between rank slots and the three backpack packs. Leave closes without taking a new pickup.</div>';
   }
   cardSwapRow.innerHTML = "";
-  const zones = [
-    { id: "pickup", label: "Pickup", card: state.pendingCard },
-    { id: "slot0", label: "Slot 1", card: inventory.cards[0] || null },
-    { id: "slot1", label: "Slot 2", card: inventory.cards[1] || null },
-    { id: "slot2", label: "Slot 3", card: inventory.cards[2] || null },
-    { id: "backpack", label: "Backpack", card: inventory.backpackCard || null },
-  ];
+
+  const zones = [];
+  if (state.cardPickupFlowActive && state.pickupTargetRank) {
+    zones.push({ id: "pickup", label: "New pickup", card: state.pendingCard, kind: "pickup" });
+    zones.push({
+      id: `deck-${state.pickupTargetRank}`,
+      label: `Card slot: ${cardRankText(state.pickupTargetRank)}`,
+      card: inventory.deckByRank[state.pickupTargetRank] || null,
+      kind: "rank",
+    });
+  } else if (state.pendingCard) {
+    zones.push({ id: "pickup", label: "New pickup", card: state.pendingCard, kind: "pickup" });
+  }
+  for (let i = 0; i < 3; i++) zones.push({ id: `bp-${i}`, label: `Backpack ${i + 1}`, card: inventory.backpackSlots[i] || null, kind: "bp" });
 
   for (const zone of zones) {
     const zoneEl = document.createElement("div");
-    zoneEl.className = "drop-zone";
-    zoneEl.dataset.zoneId = zone.id;
+    let zc = "drop-zone drop-zone--swap";
+    if (zone.kind === "pickup" || zone.kind === "rank") zc += " drop-zone--main-slot";
+    if (zone.kind === "bp") zc += " drop-zone--backpack-sm";
+    zoneEl.className = zc;
     zoneEl.innerHTML = `<div class="zone-label">${zone.label}</div>`;
-    zoneEl.addEventListener("dragover", (event) => {
-      event.preventDefault();
-      zoneEl.classList.add("over");
-    });
-    zoneEl.addEventListener("dragleave", () => zoneEl.classList.remove("over"));
-    zoneEl.addEventListener("drop", (event) => {
-      event.preventDefault();
-      zoneEl.classList.remove("over");
-      const from = event.dataTransfer?.getData("text/plain");
-      if (!from) return;
-      swapCardsBetweenZones(from, zone.id);
-    });
-    if (zone.card) {
-      const cardEl = document.createElement("div");
-      cardEl.className = "zone-card";
-      cardEl.draggable = true;
-      cardEl.textContent = `${formatCardName(zone.card)} - ${describeCardEffect(zone.card)}`;
-      cardEl.addEventListener("dragstart", (event) => {
-        event.dataTransfer?.setData("text/plain", zone.id);
-      });
-      zoneEl.appendChild(cardEl);
-    } else {
-      const emptyEl = document.createElement("div");
-      emptyEl.className = "zone-empty";
-      emptyEl.textContent = "Empty";
-      zoneEl.appendChild(emptyEl);
-    }
+    wireDropZone(zoneEl, zone.id);
+    appendCardToZone(zoneEl, zone.id, zone.card, false);
     cardSwapRow.appendChild(zoneEl);
   }
 
@@ -652,37 +1040,66 @@ function renderCardModal() {
   leaveBtn.addEventListener("click", () => continueAfterLoadout());
   cardSwapRow.appendChild(leaveBtn);
   if (modalSetBonusStatusEl) {
-    const lines = getSetBonusLines();
-    modalSetBonusStatusEl.textContent = lines.length ? lines.join(" ") : "";
+    const progress = getModalSetBonusProgressLines();
+    modalSetBonusStatusEl.textContent = progress.length ? progress.join("\n") : "";
   }
+  renderCardSlots();
 }
 
 function getCardByZone(zoneId) {
   if (zoneId === "pickup") return state.pendingCard;
-  if (zoneId === "backpack") return inventory.backpackCard;
-  if (zoneId.startsWith("slot")) {
-    const idx = Number(zoneId.slice(4));
-    if (Number.isInteger(idx) && idx >= 0 && idx < 3) return inventory.cards[idx] || null;
-  }
+  const dr = parseDeckZoneId(zoneId);
+  if (dr != null) return inventory.deckByRank[dr] || null;
+  const bi = parseBpZoneId(zoneId);
+  if (bi != null) return inventory.backpackSlots[bi] || null;
   return null;
 }
 
 function setCardByZone(zoneId, card) {
   if (zoneId === "pickup") state.pendingCard = card;
-  else if (zoneId === "backpack") inventory.backpackCard = card;
-  else if (zoneId.startsWith("slot")) {
-    const idx = Number(zoneId.slice(4));
-    if (Number.isInteger(idx) && idx >= 0 && idx < 3) inventory.cards[idx] = card;
+  else {
+    const dr = parseDeckZoneId(zoneId);
+    if (dr != null) inventory.deckByRank[dr] = card || null;
+    else {
+      const bi = parseBpZoneId(zoneId);
+      if (bi != null) inventory.backpackSlots[bi] = card || null;
+    }
   }
 }
 
 function swapCardsBetweenZones(fromZoneId, toZoneId) {
   if (!fromZoneId || !toZoneId || fromZoneId === toZoneId) return;
+
+  const dFrom = parseDeckZoneId(fromZoneId);
+  const dTo = parseDeckZoneId(toZoneId);
+  const bFrom = parseBpZoneId(fromZoneId);
+  const bTo = parseBpZoneId(toZoneId);
+  const toPickup = toZoneId === "pickup";
+
+  if (dFrom != null && dTo != null && dFrom !== dTo) return;
+
   const fromCard = getCardByZone(fromZoneId);
-  if (!fromCard) return;
   const toCard = getCardByZone(toZoneId);
+  if (!fromCard && !toCard) return;
+
+  const allowStageToEmptyPickup =
+    toPickup &&
+    !state.pendingCard &&
+    state.cardPickupFlowActive &&
+    fromCard &&
+    ((dFrom != null && dFrom === state.pickupTargetRank) ||
+      (bFrom != null && fromCard.rank === state.pickupTargetRank));
+  if (toPickup && !state.pendingCard && !allowStageToEmptyPickup) return;
+  if (toPickup && !fromCard) return;
+
+  if (dFrom != null && fromCard && fromCard.rank !== dFrom) return;
+  if (dTo != null && fromCard && fromCard.rank !== dTo) return;
+  if (dTo != null && toCard && toCard.rank !== dTo) return;
+  if (dFrom != null && toPickup && toCard && toCard.rank !== dFrom) return;
+  if (dFrom != null && bTo != null && toCard && toCard.rank !== dFrom) return;
+
   setCardByZone(fromZoneId, toCard || null);
-  setCardByZone(toZoneId, fromCard);
+  setCardByZone(toZoneId, fromCard || null);
   recalcCardPassives();
   renderCardModal();
 }
@@ -690,6 +1107,8 @@ function swapCardsBetweenZones(fromZoneId, toZoneId) {
 function closeCardModal() {
   state.inventoryModalOpen = false;
   state.pendingCard = null;
+  state.cardPickupFlowActive = false;
+  state.pickupTargetRank = null;
   state.pausedForCard = true;
   state.waitingForMovementResume = true;
   state.playerHeadstartUntil = state.elapsed + 0.3;
@@ -700,54 +1119,6 @@ function continueAfterLoadout() {
   // Any unplaced pickup is discarded when continuing.
   state.pendingCard = null;
   closeCardModal();
-}
-
-function pickPendingCard(swapIdx = -1) {
-  if (!state.pendingCard) return;
-  if (inventory.cards.length < 3) inventory.cards.push(state.pendingCard);
-  else if (swapIdx >= 0 && swapIdx < inventory.cards.length) inventory.cards[swapIdx] = state.pendingCard;
-  closeCardModal();
-  recalcCardPassives();
-}
-
-function putPendingInActiveSlot(slotIdx) {
-  if (!state.pendingCard) return;
-  if (slotIdx < 0 || slotIdx >= 3) return;
-  const prev = inventory.cards[slotIdx] || null;
-  inventory.cards[slotIdx] = state.pendingCard;
-  state.pendingCard = prev;
-  recalcCardPassives();
-  renderCardModal();
-}
-
-function putPendingInBackpack() {
-  if (!state.pendingCard) return;
-  const prev = inventory.backpackCard;
-  inventory.backpackCard = state.pendingCard;
-  state.pendingCard = prev;
-  renderCardSlots();
-  updateSetBonusStatus();
-  renderCardModal();
-}
-
-function moveBackpackToSlot(slotIdx) {
-  if (!inventory.backpackCard) return;
-  if (slotIdx < 0 || slotIdx >= 3) return;
-  const prev = inventory.cards[slotIdx] || null;
-  inventory.cards[slotIdx] = inventory.backpackCard;
-  inventory.backpackCard = prev;
-  recalcCardPassives();
-  renderCardModal();
-}
-
-function moveSlotToBackpack(slotIdx) {
-  if (slotIdx < 0 || slotIdx >= 3) return;
-  if (!inventory.cards[slotIdx]) return;
-  const prev = inventory.backpackCard;
-  inventory.backpackCard = inventory.cards[slotIdx];
-  inventory.cards[slotIdx] = prev;
-  recalcCardPassives();
-  renderCardModal();
 }
 
 function showSetBonusChoice() {
@@ -1016,9 +1387,9 @@ function selectCharacter(id) {
 
 function formatControlsHintLine() {
   if (selectedCharacter.id === "rogue") {
-    return "Move: Arrows | Abilities: Q dash, W smoke bomb, E point to food | Pause: Space | Restart: R";
+    return "Move: Arrows | Abilities: Q dash, W smoke bomb, E point to food | Pause: Space | Retry: R (character select)";
   }
-  return "Move: Arrows | Abilities: Q dash, W speed burst, E decoy | Pause: Space | Restart: R";
+  return "Move: Arrows | Abilities: Q dash, W speed burst, E decoy | Pause: Space | Retry: R (character select)";
 }
 
 function refreshControlsHint() {
@@ -1043,7 +1414,7 @@ function characterTutorialHtml(id) {
         <li><strong>W — ${k.burst.label}:</strong> short speed surge that shoves hunters aside—break chokes or sprint to safety.</li>
         <li><strong>E — ${k.decoy.label}:</strong> drops a lure so hunters fixate elsewhere while you reposition.</li>
       </ul>
-      <p class="character-detail-lead" style="margin-top:10px">Pause: Space · Restart: R.</p>
+      <p class="character-detail-lead" style="margin-top:10px">Pause: Space · Retry: R returns to character select.</p>
     `;
   }
   if (id === "rogue") {
@@ -1055,7 +1426,7 @@ function characterTutorialHtml(id) {
         <li><strong>W — ${r.burst.label}:</strong> throws a smoke bomb that leaves a lingering cloud—fight inside it or chain it with walls to control where you are visible.</li>
         <li><strong>E — ${r.decoy.label}:</strong> for a short window, on-screen cues point toward nearby food—use it when you are low and need to find the next bite fast.</li>
       </ul>
-      <p class="character-detail-lead" style="margin-top:10px">The top-left <strong>Fed</strong> bar and the arcs around your hero show hunger and stealth grace. Pause: Space · Restart: R.</p>
+      <p class="character-detail-lead" style="margin-top:10px">The top-left <strong>Fed</strong> bar and the arcs around your hero show hunger and stealth grace. Pause: Space · Retry: R returns to character select.</p>
     `;
   }
   return "";
@@ -1063,6 +1434,10 @@ function characterTutorialHtml(id) {
 
 function wireCharacterSelect() {
   if (!characterSelectModal || !characterSelectOptions?.length) {
+    afterDeathRetry = () => {
+      resetGame();
+      gameStarted = true;
+    };
     startGameWithCharacter("knight");
     return;
   }
@@ -1125,12 +1500,20 @@ function wireCharacterSelect() {
     backBtn.addEventListener("click", showPick);
     if (howtoOpenBtn) howtoOpenBtn.addEventListener("click", showHowToPlay);
     if (howtoBackBtn) howtoBackBtn.addEventListener("click", showPick);
+    afterDeathRetry = () => {
+      showPick();
+      characterSelectModal.classList.add("open");
+    };
   } else {
     for (const btn of characterSelectOptions) {
       btn.addEventListener("click", () => {
         startGameWithCharacter(btn.dataset.characterId || "knight");
       });
     }
+    afterDeathRetry = () => {
+      resetGame();
+      gameStarted = true;
+    };
   }
 }
 
@@ -1138,6 +1521,16 @@ function lootSpawnIntervalScale() {
   const activeCount = Math.max(1, activeHexes.length || 1);
   // Spawn slower as visible hex count rises to keep perceived loot density stable.
   return Math.max(1, Math.sqrt(activeCount / LOOT_DENSITY_BASE_ACTIVE_HEXES));
+}
+
+/** 0 at run start → 1 after DANGER_RAMP_SECONDS of survival (game time). */
+function getDangerRamp01() {
+  return clamp(state.elapsed / DANGER_RAMP_SECONDS, 0, 1);
+}
+
+function getSpawnIntervalFromRunTime() {
+  const t = getDangerRamp01();
+  return SPAWN_INTERVAL_START + (SPAWN_INTERVAL_FLOOR - SPAWN_INTERVAL_START) * t;
 }
 
 function resetGame() {
@@ -1162,7 +1555,11 @@ function resetGame() {
   state.playerTimelockUntil = 0;
   state.tempHp = 0;
   state.tempHpExpiry = 0;
-  state.ultimatePushbackReadyAt = 0;
+  state.ultimateBurstWaves = [];
+  state.timelockEnemyFrom = 0;
+  state.timelockEnemyUntil = 0;
+  state.timelockWorldShakeAt = 0;
+  state.knightSpadesWorldSlowUntil = 0;
   state.screenShakeUntil = 0;
   state.screenShakeStrength = 0;
   state.deathStartedAtMs = 0;
@@ -1171,6 +1568,8 @@ function resetGame() {
   state.inventoryModalOpen = false;
   state.waitingForMovementResume = false;
   state.pendingCard = null;
+  state.cardPickupFlowActive = false;
+  state.pickupTargetRank = null;
   state.setBonusChoicePendingSuit = null;
   state.playerHeadstartUntil = 0;
   state.rogueHungerMax = 60;
@@ -1206,6 +1605,7 @@ function resetGame() {
   abilities.random.type = null;
   abilities.random.ammo = 0;
   abilities.random.maxAmmo = 0;
+  abilities.random.nextReadyAt = 0;
   entities.hunters = [];
   entities.pickups = [];
   entities.decoys = [];
@@ -1221,8 +1621,8 @@ function resetGame() {
   entities.healPopups = [];
   entities.smokeZones = [];
   entities.foods = [];
-  inventory.cards = [];
-  inventory.backpackCard = null;
+  inventory.deckByRank = makeEmptyDeckByRank();
+  inventory.backpackSlots = [null, null, null];
   inventory.diamondEmpower = null;
   inventory.heartsRegenPerSec = 0;
   inventory.spadesLandingStealthUntil = 0;
@@ -1430,6 +1830,11 @@ function spawnAttackRing(x, y, r, color = "#fca5a5", duration = 0.18) {
   });
 }
 
+function triggerUltScreenShake(strength = 10, durationSec = 0.22) {
+  state.screenShakeUntil = state.elapsed + durationSec;
+  state.screenShakeStrength = Math.max(state.screenShakeStrength, strength);
+}
+
 /** Impact moment: bright flash + clean concentric shockwaves; `u` is 0..1. */
 function drawArtilleryDetonationBang(ctx, zone, u) {
   const { x, y, r } = zone;
@@ -1468,15 +1873,23 @@ function drawArtilleryDetonationBang(ctx, zone, u) {
   }
 }
 
-function spawnUltimateEffect(type, x, y, color, duration, radius) {
+/**
+ * @param {object} [opts] Optional `bornAt` / `expiresAt` (otherwise `bornAt = now`, `expiresAt = bornAt + duration`).
+ */
+function spawnUltimateEffect(type, x, y, color, duration, radius, opts = {}) {
+  const o = opts || {};
+  const bornAt = o.bornAt != null ? o.bornAt : state.elapsed;
+  const expiresAt = o.expiresAt != null ? o.expiresAt : bornAt + duration;
+  const { bornAt: _b, expiresAt: _e, ...extra } = o;
   entities.ultimateEffects.push({
     type,
     x,
     y,
     color,
-    bornAt: state.elapsed,
-    expiresAt: state.elapsed + duration,
+    bornAt,
+    expiresAt,
     radius,
+    ...extra,
   });
 }
 
@@ -1681,7 +2094,7 @@ function scheduleWaveSpawns() {
 
 function advanceSpawnWave() {
   state.wave += 1;
-  state.spawnInterval = Math.max(1.8, state.spawnInterval * 0.93);
+  state.spawnInterval = getSpawnIntervalFromRunTime();
   state.nextSpawnAt = state.elapsed + state.spawnInterval;
   scheduleWaveSpawns();
 }
@@ -1812,20 +2225,20 @@ function anyOtherEnemyHasLineOfSightToPlayer(excludedHunter) {
   return false;
 }
 
-function spawnHealPopup(x, y, text = "+1", color = "#86efac") {
+function spawnHealPopup(x, y, text = "+1", color = "#86efac", life = 0.6, fontPx = 14) {
   entities.healPopups.push({
     x,
     y,
     text,
+    color,
+    fontPx,
     bornAt: state.elapsed,
-    expiresAt: state.elapsed + 0.6,
+    expiresAt: state.elapsed + life,
   });
 }
 
 function forEachActiveCard(fn) {
-  for (const card of inventory.cards) {
-    if (card) fn(card);
-  }
+  forEachDeckCard((card) => fn(card));
 }
 
 function getHeartsResistanceCardCount() {
@@ -1851,6 +2264,8 @@ function openCardPickupModal(card) {
   state.inventoryModalOpen = true;
   state.waitingForMovementResume = false;
   state.pendingCard = card;
+  state.cardPickupFlowActive = true;
+  state.pickupTargetRank = card.rank;
   state.keys.clear();
   renderCardModal();
 }
@@ -1875,8 +2290,12 @@ function tryDash() {
   const ability = abilities.dash;
   if (!state.running) return;
   if (dashState.charges <= 0) return;
-  const spadesCount = inventory.cards.filter((c) => c.suit === "spades").length;
-  const wasStealthed =
+  let spadesCount = 0;
+  forEachDeckCard((c) => {
+    if (c.suit === "spades") spadesCount += 1;
+  });
+  /** Rogue: true stealth; Knight: Clubs burst invisibility only (no rogue stealth). */
+  const qualifiesForSpadesDashBonus =
     (selectedCharacter.id === "rogue" && state.rogueStealthActive) ||
     state.elapsed < inventory.clubsInvisUntil;
   dashState.charges -= 1;
@@ -1888,24 +2307,17 @@ function tryDash() {
   if (target.progressed) {
     player.x = target.x;
     player.y = target.y;
-    if (spadesCount >= 3 && wasStealthed) {
-      if (selectedCharacter.id === "rogue") {
-        // Spades 3-set: actually re-enter stealth so patrol AI / HUD / contact rules match "stealth landing".
-        state.rogueStealthActive = true;
-        state.rogueStealthOpenUntil = Math.max(
-          state.rogueStealthOpenUntil,
-          state.elapsed + ROGUE_STEALTH_OPEN_GRACE + 0.12
-        );
-        inventory.spadesLandingStealthUntil = Math.max(
-          inventory.spadesLandingStealthUntil,
-          state.rogueStealthOpenUntil
-        );
-      } else {
-        inventory.spadesLandingStealthUntil = Math.max(
-          inventory.spadesLandingStealthUntil,
-          state.elapsed + 0.12
-        );
-      }
+    if (selectedCharacter.id === "rogue" && spadesCount >= SET_BONUS_SUIT_THRESHOLD && qualifiesForSpadesDashBonus) {
+      // Spades set bonus: actually re-enter stealth so patrol AI / HUD / contact rules match "stealth landing".
+      state.rogueStealthActive = true;
+      state.rogueStealthOpenUntil = Math.max(
+        state.rogueStealthOpenUntil,
+        state.elapsed + ROGUE_STEALTH_OPEN_GRACE + 0.12
+      );
+      inventory.spadesLandingStealthUntil = Math.max(
+        inventory.spadesLandingStealthUntil,
+        state.rogueStealthOpenUntil
+      );
     }
   }
 }
@@ -2014,73 +2426,118 @@ function tryDecoy() {
   });
 }
 
-function grantRandomAbility() {
-  const pool = ["shield", "burst", "timelock", "heal"];
-  const prev = abilities.random.type;
-  const choices = pool.filter((t) => t !== prev);
-  const pickFrom = choices.length ? choices : pool;
-  const next = pickFrom[Math.floor(Math.random() * pickFrom.length)];
-  abilities.random.type = next;
-  abilities.random.maxAmmo = next === "timelock" ? 3 : 1;
-  abilities.random.ammo = abilities.random.maxAmmo;
-  entities.shields = [];
+function applyUltimateBurstWavePush(burstRadius) {
+  for (const h of entities.hunters) {
+    const d2 = distSq(player, h);
+    if (d2 > burstRadius * burstRadius) continue;
+    const away = vectorToTarget(player, h);
+    const push = h.type === "spawner" ? 0 : 95;
+    const test = { x: h.x + away.x * push, y: h.y + away.y * push, r: h.r };
+    if (!outOfBoundsCircle(test) && !collidesAnyObstacle(test)) {
+      h.x = test.x;
+      h.y = test.y;
+    }
+    h.dir.x = away.x;
+    h.dir.y = away.y;
+  }
+  for (let i = entities.projectiles.length - 1; i >= 0; i--) {
+    if (distSq(player, entities.projectiles[i]) <= burstRadius * burstRadius) {
+      entities.projectiles.splice(i, 1);
+    }
+  }
+}
+
+function processUltimateBurstWaves() {
+  const waves = state.ultimateBurstWaves;
+  if (!waves.length) return;
+  const r = ULT_BURST_RADIUS;
+  while (waves.length && state.elapsed >= waves[0]) {
+    waves.shift();
+    applyUltimateBurstWavePush(r);
+    triggerUltScreenShake(11, 0.16);
+    spawnAttackRing(player.x, player.y, r * 0.92, "#e0f2fe", 0.26);
+    spawnAttackRing(player.x, player.y, r * 0.72, "#93c5fd", 0.22);
+    spawnAttackRing(player.x, player.y, r * 0.48, "#bfdbfe", 0.18);
+    spawnUltimateEffect("burstWave", player.x, player.y, "#93c5fd", 0.52, r);
+  }
 }
 
 function useRandomAbility() {
   const ability = abilities.random;
   if (!state.running || !ability.type || ability.ammo <= 0) return;
-  if (ability.type === "burst" && state.elapsed < state.ultimatePushbackReadyAt) return;
+  if (state.elapsed < ability.nextReadyAt) return;
+  if (state.playerTimelockUntil > state.elapsed) return;
 
   if (ability.type === "shield") {
-    spawnAttackRing(player.x, player.y, player.r + 34, "#93c5fd", 0.28);
-    spawnUltimateEffect("shieldSummon", player.x, player.y, "#93c5fd", 0.45, 56);
-    entities.shields = [
-      {
-        angle: 0,
-        radius: player.r + 22,
+    triggerUltScreenShake(9, 0.2);
+    spawnAttackRing(player.x, player.y, player.r + 28, "#ffffff", 0.12);
+    spawnAttackRing(player.x, player.y, player.r + 52, "#bfdbfe", 0.34);
+    spawnAttackRing(player.x, player.y, player.r + 88, "#60a5fa", 0.42);
+    spawnUltimateEffect("shieldSummon", player.x, player.y, "#93c5fd", 0.95, 88);
+    entities.shields = [];
+    const orbitR = player.r + ULT_ORBIT_SHIELD_RADIUS_EXTRA;
+    const t0 = state.elapsed;
+    for (let i = 0; i < 4; i++) {
+      entities.shields.push({
+        angle: (TAU / 4) * i,
+        radius: orbitR,
         r: 10,
-      },
-    ];
+        bornAt: t0,
+        expiresAt: state.elapsed + ULT_ORBIT_SHIELD_STAGGER_SEC * (i + 1),
+      });
+    }
   } else if (ability.type === "burst") {
-    const burstRadius = 140;
-    player.ultimateSpeedUntil = state.elapsed + 5;
-    spawnAttackRing(player.x, player.y, burstRadius, "#93c5fd", 0.22);
-    spawnAttackRing(player.x, player.y, burstRadius * 0.7, "#bfdbfe", 0.18);
-    spawnUltimateEffect("burstWave", player.x, player.y, "#93c5fd", 0.35, burstRadius);
-    for (const h of entities.hunters) {
-      const d2 = distSq(player, h);
-      if (d2 > burstRadius * burstRadius) continue;
-      const away = vectorToTarget(player, h);
-      const push = h.type === "spawner" ? 0 : 95;
-      const test = { x: h.x + away.x * push, y: h.y + away.y * push, r: h.r };
-      if (!outOfBoundsCircle(test) && !collidesAnyObstacle(test)) {
-        h.x = test.x;
-        h.y = test.y;
-      }
-      h.dir.x = away.x;
-      h.dir.y = away.y;
+    player.ultimateSpeedUntil = state.elapsed + ULT_BURST_WAVE_SPAN_SEC;
+    state.ultimateBurstWaves = [];
+    for (let i = 0; i < ULT_BURST_WAVE_COUNT; i++) {
+      state.ultimateBurstWaves.push(state.elapsed + (i * ULT_BURST_WAVE_SPAN_SEC) / ULT_BURST_WAVE_COUNT);
     }
-    for (let i = entities.projectiles.length - 1; i >= 0; i--) {
-      if (distSq(player, entities.projectiles[i]) <= burstRadius * burstRadius) {
-        entities.projectiles.splice(i, 1);
-      }
-    }
-    state.ultimatePushbackReadyAt = state.elapsed + 8;
+    triggerUltScreenShake(13, 0.24);
+    spawnAttackRing(player.x, player.y, ULT_BURST_RADIUS * 0.35, "#ffffff", 0.14);
+    spawnAttackRing(player.x, player.y, ULT_BURST_RADIUS * 0.72, "#bfdbfe", 0.24);
+    spawnAttackRing(player.x, player.y, ULT_BURST_RADIUS * 0.95, "#93c5fd", 0.28);
+    spawnUltimateEffect("burstWave", player.x, player.y, "#e0f2fe", 0.4, ULT_BURST_RADIUS * 0.6);
   } else if (ability.type === "timelock") {
     state.playerTimelockUntil = Math.max(state.playerTimelockUntil, state.elapsed + 2);
-    state.playerInvulnerableUntil = Math.max(state.playerInvulnerableUntil, state.elapsed + 3);
-    spawnAttackRing(player.x, player.y, player.r + 24, "#c084fc", 0.3);
-    spawnAttackRing(player.x, player.y, player.r + 46, "#e9d5ff", 0.36);
-    spawnUltimateEffect("timelock", player.x, player.y, "#c084fc", 3, 40);
+    state.playerInvulnerableUntil = Math.max(state.playerInvulnerableUntil, state.elapsed + 2);
+    state.timelockEnemyFrom = state.elapsed + 2;
+    state.timelockEnemyUntil = state.elapsed + 4;
+    state.timelockWorldShakeAt = state.elapsed + 2;
+    triggerUltScreenShake(6, 0.18);
+    spawnAttackRing(player.x, player.y, player.r + 18, "#faf5ff", 0.22);
+    spawnAttackRing(player.x, player.y, player.r + 36, "#e9d5ff", 0.32);
+    spawnAttackRing(player.x, player.y, player.r + 58, "#c084fc", 0.4);
+    spawnUltimateEffect("timelock", player.x, player.y, "#c084fc", 4, 56);
+    spawnUltimateEffect(
+      "timelockWorld",
+      player.x,
+      player.y,
+      "#c4b5fd",
+      2,
+      ULT_BURST_RADIUS * 1.05,
+      { bornAt: state.elapsed + 2, expiresAt: state.elapsed + 4 }
+    );
   } else if (ability.type === "heal") {
-    state.tempHp = 2;
+    state.tempHp = 3;
     state.tempHpExpiry = state.elapsed + 20;
-    spawnAttackRing(player.x, player.y, player.r + 26, "#4ade80", 0.26);
-    spawnAttackRing(player.x, player.y, player.r + 44, "#bbf7d0", 0.32);
-    spawnUltimateEffect("healVitality", player.x, player.y, "#34d399", 0.5, 48);
+    triggerUltScreenShake(7, 0.18);
+    spawnAttackRing(player.x, player.y, player.r + 18, "#ecfdf5", 0.2);
+    spawnAttackRing(player.x, player.y, player.r + 38, "#bbf7d0", 0.34);
+    spawnAttackRing(player.x, player.y, player.r + 62, "#34d399", 0.42);
+    spawnUltimateEffect("healVitality", player.x, player.y, "#34d399", 1.15, 72);
+    spawnHealPopup(player.x, player.y - player.r - 20, "+3", "#6ee7b7", 1.0, 16);
+    spawnHealPopup(player.x, player.y - player.r - 36, "VITALITY", "#a7f3d0", 0.85, 12);
   }
 
   ability.ammo -= 1;
+  ability.nextReadyAt = state.elapsed + ULTIMATE_ABILITY_COOLDOWN_SEC;
+
+  if (
+    selectedCharacter.id === "knight" &&
+    countSuitsInActiveSlots().spades >= SET_BONUS_SUIT_THRESHOLD
+  ) {
+    state.knightSpadesWorldSlowUntil = state.elapsed + KNIGHT_SPADES_WORLD_SLOW_SEC;
+  }
 }
 
 function nearestDecoy(from) {
@@ -2116,7 +2573,10 @@ function pickTargetForHunter(hunter) {
     return state.rogueLastKnownPlayerPos || { x: hunter.x + hunter.dir.x * 40, y: hunter.y + hunter.dir.y * 40 };
   }
   let target = player;
-  if (state.elapsed < inventory.clubsInvisUntil || state.elapsed < inventory.spadesLandingStealthUntil) {
+  if (
+    state.elapsed < inventory.clubsInvisUntil ||
+    (selectedCharacter.id === "rogue" && state.elapsed < inventory.spadesLandingStealthUntil)
+  ) {
     return nearestDecoy(hunter) || { x: hunter.x + hunter.dir.x * 40, y: hunter.y + hunter.dir.y * 40 };
   }
   if (!entities.decoys.length) return target;
@@ -2170,7 +2630,7 @@ function moveHunters(dt) {
 
     const lifeSpan = h.life || Math.max(0.0001, h.dieAt - h.bornAt);
     const age = clamp((state.elapsed - h.bornAt) / lifeSpan, 0, 1);
-    const speedFactor = 1 + age * 0.9;
+    const speedFactor = 1 + age * HUNTER_SPEED_AGE_COEFF;
     const baseSpeed =
       h.type === "sniper"
         ? 100
@@ -2444,7 +2904,7 @@ function hitDecoyIfAny(source, range) {
 function damagePlayer(amount) {
   if (!state.running) return;
   if (selectedCharacter.id === "rogue" && state.rogueStealthActive) return;
-  if (state.elapsed < inventory.spadesLandingStealthUntil) return;
+  if (selectedCharacter.id === "rogue" && state.elapsed < inventory.spadesLandingStealthUntil) return;
   if (state.elapsed < state.playerInvulnerableUntil) return;
   if (amount <= 0) return;
   if (state.elapsed < inventory.clubsInvisUntil) return;
@@ -2592,7 +3052,6 @@ function updateCollisions() {
         const remaining = ability.nextReadyAt - state.elapsed;
         if (remaining > 0) ability.nextReadyAt = state.elapsed + remaining * refreshFactor;
       }
-      grantRandomAbility();
       entities.pickups.splice(i, 1);
     }
   }
@@ -2614,6 +3073,12 @@ function updateSpecialAbilityEffects(dt) {
     }
   }
 
+  for (let i = entities.shields.length - 1; i >= 0; i--) {
+    if (state.elapsed >= entities.shields[i].expiresAt) {
+      entities.shields.splice(i, 1);
+      continue;
+    }
+  }
   for (const shield of entities.shields) {
     shield.angle += dt * 3.8;
     shield.x = player.x + Math.cos(shield.angle) * shield.radius;
@@ -2724,9 +3189,31 @@ function update(dt) {
   state.elapsed += simDt;
   updateRogueLineOfSightState();
   const enemiesFrozen = state.elapsed < state.playerHeadstartUntil;
+  const timelockWorldFrozen =
+    state.timelockEnemyUntil > state.elapsed && state.elapsed >= state.timelockEnemyFrom;
+  const pauseHostiles = enemiesFrozen || timelockWorldFrozen;
+  const knightSpadesWorldSlowActive =
+    selectedCharacter.id === "knight" && state.elapsed < state.knightSpadesWorldSlowUntil;
+  const enemySimDt = knightSpadesWorldSlowActive ? simDt * KNIGHT_SPADES_WORLD_SLOW_MULT : simDt;
   state.hurtFlash = Math.max(0, state.hurtFlash - simDt);
   state.screenShakeStrength = Math.max(0, state.screenShakeStrength - simDt * 30);
   if (state.elapsed >= state.playerTimelockUntil) state.playerTimelockUntil = 0;
+  if (state.timelockEnemyUntil > 0 && state.elapsed >= state.timelockEnemyUntil) {
+    state.timelockEnemyFrom = 0;
+    state.timelockEnemyUntil = 0;
+  }
+  if (state.timelockWorldShakeAt > 0 && state.elapsed >= state.timelockWorldShakeAt) {
+    state.timelockWorldShakeAt = 0;
+    triggerUltScreenShake(20, 0.38);
+  }
+  processUltimateBurstWaves();
+  if (
+    abilities.random.type &&
+    state.elapsed >= abilities.random.nextReadyAt &&
+    abilities.random.ammo < abilities.random.maxAmmo
+  ) {
+    abilities.random.ammo = abilities.random.maxAmmo;
+  }
   if (state.tempHp > 0 && state.tempHpExpiry > 0 && state.elapsed >= state.tempHpExpiry) clearTempHp();
   if (inventory.heartsRegenPerSec > 0 && player.hp > 0) {
     inventory.heartsRegenBank += inventory.heartsRegenPerSec * simDt;
@@ -2846,14 +3333,14 @@ function update(dt) {
   updateRogueNeeds(simDt, moving, moveRes.touchedObstacle);
   if (!state.running) return;
   updatePlayerVelocity(dt);
-  if (!enemiesFrozen) {
-    moveHunters(simDt);
-    updateSnipers(simDt);
-    updateRangedAttackers(simDt);
-    updateSpawners(simDt);
+  if (!pauseHostiles) {
+    moveHunters(enemySimDt);
+    updateSnipers(enemySimDt);
+    updateRangedAttackers(enemySimDt);
+    updateSpawners(enemySimDt);
   }
-  updateSpecialAbilityEffects(simDt);
-  if (!enemiesFrozen) {
+  updateSpecialAbilityEffects(enemySimDt);
+  if (!pauseHostiles) {
     updateLaserHazards();
     updateCollisions();
   }
@@ -3027,26 +3514,24 @@ function updateAbilityButtons() {
       extra: "",
     },
     (() => {
-      const type = abilities.random.type;
+      const ult = abilities.random;
+      const type = ult.type;
       const hasAbility = !!type;
       const displayName = type === "burst" ? "Push" : hasAbility ? type[0].toUpperCase() + type.slice(1) : "None";
-      const lockRemaining =
-        type === "burst" ? Math.max(0, state.ultimatePushbackReadyAt - state.elapsed) : 0;
-      const locked = lockRemaining > 0;
-      const outOfAmmo = hasAbility && abilities.random.ammo <= 0;
+      const cdRem = hasAbility ? Math.max(0, ult.nextReadyAt - state.elapsed) : 0;
+      const ready = hasAbility && ult.ammo > 0 && cdRem <= 0.001;
       let color = "#64748b";
       if (type === "shield") color = "#60a5fa";
       if (type === "burst") color = "#fde68a";
       if (type === "timelock") color = "#c084fc";
       if (type === "heal") color = "#4ade80";
-      const ready = hasAbility && !locked && !outOfAmmo;
       return {
-        key: abilities.random.key.toUpperCase(),
+        key: ult.key.toUpperCase(),
         label: displayName,
         color,
-        remaining: ready ? 0 : lockRemaining || 1,
-        duration: lockRemaining > 0 ? 8 : 1,
-        extra: hasAbility ? `${abilities.random.ammo}/${abilities.random.maxAmmo}` : "0/0",
+        remaining: ready ? 0 : hasAbility ? cdRem : 0,
+        duration: hasAbility ? ULTIMATE_ABILITY_COOLDOWN_SEC : 1,
+        extra: hasAbility ? `${ult.ammo}/${ult.maxAmmo}` : "0/0",
       };
     })(),
   ];
@@ -3068,6 +3553,98 @@ function updateAbilityButtons() {
     labelEl.textContent = info.label;
     const cooldownText = info.remaining > 0.01 ? info.remaining.toFixed(1) + "s" : info.extra || "READY";
     valueEl.textContent = cooldownText;
+  }
+}
+
+function rogueFoodBurgerStackHalfHeight(rr) {
+  return (rr * 1.92) / 2;
+}
+
+/**
+ * Oval-ish rogue snack: round elliptical buns + elliptical fillings; hitbox stays `food.r` circle.
+ */
+function drawRogueFoodBurger(ctx, cx, cy, rr, foodVis, freshness, sense, near) {
+  const aBase = foodVis * (0.42 + 0.58 * freshness);
+  const pulse = sense > 0 ? 0.12 * (0.45 + near * 0.35) : 0;
+  const fillA = (opacity) => clamp(aBase * opacity + pulse, 0, 1);
+
+  const H = rr * 1.92;
+  const rxOuter = rr * 0.98;
+  const ryOuter = H / 2;
+
+  const ryTop = rr * 0.36;
+  const ryBot = rr * 0.34;
+  const ryPat = rr * 0.19;
+  const ryLet = rr * 0.055;
+  const ryCh = rr * 0.048;
+
+  const rxTop = rxOuter * 0.96;
+  const rxBot = rxOuter * 0.94;
+  const rxPat = rxOuter * 0.88;
+  const rxLet = rxOuter * 0.72;
+  const rxCh = rxOuter * 0.76;
+
+  const yTop = cy - ryOuter;
+  const cyTopBun = yTop + ryTop;
+  const yBot = cy + ryOuter;
+  const cyBotBun = yBot - ryBot;
+
+  const midY = (cyTopBun + ryTop + (cyBotBun - ryBot)) / 2;
+  const cyPat = midY;
+  const cyLet = midY - ryPat * 0.62 - ryLet * 0.5;
+  const cyCh = midY - ryPat * 0.22;
+
+  // Soft outer oval (warm undertone, ties silhouette)
+  ctx.fillStyle = `rgba(245, 158, 11, ${fillA(0.1)})`;
+  ctx.beginPath();
+  ctx.ellipse(cx, cy, rxOuter * 1.02, ryOuter * 1.02, 0, 0, TAU);
+  ctx.fill();
+
+  // Bottom bun (full ellipse — round)
+  ctx.fillStyle = `rgba(217, 119, 6, ${fillA(0.88)})`;
+  ctx.beginPath();
+  ctx.ellipse(cx, cyBotBun, rxBot, ryBot, 0, 0, TAU);
+  ctx.fill();
+  ctx.fillStyle = `rgba(251, 191, 36, ${fillA(0.35)})`;
+  ctx.beginPath();
+  ctx.ellipse(cx, cyBotBun - ryBot * 0.22, rxBot * 0.62, ryBot * 0.38, 0, 0, TAU);
+  ctx.fill();
+
+  // Patty
+  ctx.fillStyle = `rgba(78, 42, 16, ${fillA(0.92)})`;
+  ctx.beginPath();
+  ctx.ellipse(cx, cyPat, rxPat, ryPat, 0, 0, TAU);
+  ctx.fill();
+
+  // Cheese
+  ctx.fillStyle = `rgba(253, 224, 71, ${fillA(0.72)})`;
+  ctx.beginPath();
+  ctx.ellipse(cx, cyCh, rxCh, ryCh, 0, 0, TAU);
+  ctx.fill();
+
+  // Lettuce
+  ctx.fillStyle = `rgba(52, 211, 153, ${fillA(0.5)})`;
+  ctx.beginPath();
+  ctx.ellipse(cx, cyLet, rxLet, ryLet, 0, 0, TAU);
+  ctx.fill();
+
+  // Top bun (full ellipse — round dome)
+  ctx.fillStyle = `rgba(254, 243, 199, ${fillA(0.92)})`;
+  ctx.beginPath();
+  ctx.ellipse(cx, cyTopBun, rxTop, ryTop, 0, 0, TAU);
+  ctx.fill();
+  ctx.fillStyle = `rgba(255, 251, 235, ${fillA(0.45)})`;
+  ctx.beginPath();
+  ctx.ellipse(cx, cyTopBun - ryTop * 0.28, rxTop * 0.55, ryTop * 0.42, 0, 0, TAU);
+  ctx.fill();
+
+  if (sense > 0) {
+    const pd = 4 + near * 3.5;
+    ctx.strokeStyle = `rgba(252, 211, 77, ${(0.45 + near * 0.35) * (0.42 + 0.58 * freshness)})`;
+    ctx.lineWidth = 1.5;
+    ctx.beginPath();
+    ctx.ellipse(cx, cy, rxOuter + pd, ryOuter + pd * 0.85, 0, 0, TAU);
+    ctx.stroke();
   }
 }
 
@@ -3108,20 +3685,12 @@ function render(tsMs) {
     const near = clamp(1 - d / 360, 0, 1);
     const sense = state.elapsed < state.rogueFoodSenseUntil ? 1 : 0;
     const rr = food.r * (1 + near * 0.28 * sense);
-    drawCircle(ctx, food.x, food.y, rr, "#f59e0b", 0.9 * foodVis);
-    drawCircle(ctx, food.x, food.y, rr * 0.45, "#fef3c7", 0.85 * foodVis);
-    if (sense > 0) {
-      ctx.strokeStyle = `rgba(252, 211, 77, ${(0.45 + near * 0.35) * (0.42 + 0.58 * freshness)})`;
-      ctx.lineWidth = 1.5;
-      ctx.beginPath();
-      ctx.arc(food.x, food.y, rr + 5 + near * 4, 0, TAU);
-      ctx.stroke();
-    }
+    drawRogueFoodBurger(ctx, food.x, food.y, rr, foodVis, freshness, sense, near);
 
     const barW = 34;
     const barH = 4;
     const bx = food.x - barW / 2;
-    const by = food.y + food.r + 8;
+    const by = food.y + rogueFoodBurgerStackHalfHeight(rr) + 6;
     ctx.fillStyle = "rgba(148, 163, 184, 0.32)";
     ctx.fillRect(bx, by, barW, barH);
     ctx.fillStyle = lifeLeft > 0.35 ? "#f59e0b" : "#ef4444";
@@ -3239,55 +3808,201 @@ function render(tsMs) {
   }
 
   for (const fx of entities.ultimateEffects) {
-    const t = clamp((state.elapsed - fx.bornAt) / Math.max(0.001, fx.expiresAt - fx.bornAt), 0, 1);
+    if (state.elapsed < fx.bornAt) continue;
+    const span = Math.max(0.001, fx.expiresAt - fx.bornAt);
+    const t = clamp((state.elapsed - fx.bornAt) / span, 0, 1);
     if (fx.type === "burstWave") {
-      const rr = fx.radius * (0.25 + t * 0.9);
-      ctx.strokeStyle = `rgba(147, 197, 253, ${0.85 * (1 - t)})`;
-      ctx.lineWidth = 10 - t * 6;
+      const ease = 1 - Math.pow(1 - t, 1.35);
+      const rr = fx.radius * (0.1 + ease * 0.98);
+      ctx.save();
+      ctx.translate(fx.x, fx.y);
+      ctx.rotate(state.elapsed * 6 + fx.bornAt * 3);
+      if (t < 0.22) {
+        const flash = 1 - t / 0.22;
+        drawCircle(ctx, 0, 0, rr * 0.12 + flash * fx.radius * 0.1, "#ffffff", 0.5 * flash);
+      }
+      const segs = 40;
+      for (let k = 0; k < 3; k++) {
+        const rrk = rr * (1 - k * 0.1);
+        const alpha = (0.62 - k * 0.14) * (1 - t);
+        ctx.strokeStyle = `rgba(224, 242, 254, ${alpha})`;
+        ctx.lineWidth = 11 - k * 2.5 - t * 5;
+        ctx.beginPath();
+        for (let i = 0; i <= segs; i++) {
+          const ang = (i / segs) * TAU;
+          const wobble = 1 + 0.045 * Math.sin(ang * 9 + state.elapsed * 24);
+          const px = Math.cos(ang) * rrk * wobble;
+          const py = Math.sin(ang) * rrk * wobble;
+          if (i === 0) ctx.moveTo(px, py);
+          else ctx.lineTo(px, py);
+        }
+        ctx.closePath();
+        ctx.stroke();
+      }
+      ctx.restore();
+      ctx.strokeStyle = `rgba(96, 165, 250, ${0.4 * (1 - t)})`;
+      ctx.lineWidth = 3;
       ctx.beginPath();
-      ctx.arc(fx.x, fx.y, rr, 0, TAU);
+      ctx.arc(fx.x, fx.y, rr + 10, 0, TAU);
       ctx.stroke();
     } else if (fx.type === "shieldSummon") {
-      const rr = fx.radius * (0.35 + t * 0.85);
-      drawCircle(ctx, fx.x, fx.y, rr, fx.color, 0.16 * (1 - t));
-      ctx.strokeStyle = `rgba(191, 219, 254, ${0.9 * (1 - t)})`;
-      ctx.lineWidth = 6 - t * 3;
-      ctx.beginPath();
-      ctx.arc(fx.x, fx.y, rr, 0, TAU);
-      ctx.stroke();
-    } else if (fx.type === "timelock") {
-      const pulse = 0.75 + 0.25 * (0.5 + 0.5 * Math.sin(state.elapsed * 12));
-      const rr = fx.radius + pulse * 10;
-      drawCircle(ctx, fx.x, fx.y, rr, fx.color, 0.08);
-      ctx.strokeStyle = `rgba(192, 132, 252, ${0.32 + 0.18 * pulse})`;
-      ctx.lineWidth = 4 + pulse * 3;
-      ctx.beginPath();
-      ctx.arc(fx.x, fx.y, rr, 0, TAU);
-      ctx.stroke();
-    } else if (fx.type === "healVitality") {
-      const pulse = 0.75 + 0.25 * (0.5 + 0.5 * Math.sin(state.elapsed * 14));
-      const rr = fx.radius * (0.4 + t * 0.75);
-      drawCircle(ctx, fx.x, fx.y, rr, fx.color, 0.12 * (1 - t));
-      ctx.strokeStyle = `rgba(52, 211, 153, ${0.55 * (1 - t)})`;
+      const rr = fx.radius * (0.2 + t * 1.05);
+      ctx.save();
+      ctx.translate(fx.x, fx.y);
+      ctx.rotate(-state.elapsed * 2.2);
+      const rays = 20;
+      for (let i = 0; i < rays; i++) {
+        const ang = (i / rays) * TAU;
+        const len = rr * (0.55 + 0.45 * (1 - t));
+        const alpha = (0.35 - i * 0.008) * (1 - t);
+        ctx.strokeStyle = `rgba(191, 219, 254, ${Math.max(0, alpha)})`;
+        ctx.lineWidth = 2;
+        ctx.beginPath();
+        ctx.moveTo(Math.cos(ang) * rr * 0.08, Math.sin(ang) * rr * 0.08);
+        ctx.lineTo(Math.cos(ang) * len, Math.sin(ang) * len);
+        ctx.stroke();
+      }
+      ctx.restore();
+      drawCircle(ctx, fx.x, fx.y, rr * 0.45, "#dbeafe", 0.28 * (1 - t * 0.6));
+      drawCircle(ctx, fx.x, fx.y, rr, fx.color, 0.14 * (1 - t));
+      ctx.strokeStyle = `rgba(255, 255, 255, ${0.75 * (1 - t)})`;
       ctx.lineWidth = 5 - t * 2.5;
       ctx.beginPath();
+      ctx.arc(fx.x, fx.y, rr * (0.92 - t * 0.08), 0, TAU);
+      ctx.stroke();
+      ctx.strokeStyle = `rgba(59, 130, 246, ${0.45 * (1 - t)})`;
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      ctx.arc(fx.x, fx.y, rr * 1.08, 0, TAU);
+      ctx.stroke();
+    } else if (fx.type === "timelockWorld") {
+      const ease = 1 - Math.pow(1 - t, 0.85);
+      const rr = fx.radius * (0.15 + ease * 1.05);
+      const frost = 0.22 * (1 - t);
+      drawCircle(ctx, fx.x, fx.y, rr, "#e0e7ff", frost * 0.5);
+      ctx.strokeStyle = `rgba(196, 181, 253, ${0.55 * (1 - t * 0.5)})`;
+      ctx.lineWidth = 5 + (1 - t) * 4;
+      ctx.beginPath();
       ctx.arc(fx.x, fx.y, rr, 0, TAU);
       ctx.stroke();
+      const ticks = 24;
+      for (let i = 0; i < ticks; i++) {
+        const ang = (i / ticks) * TAU - state.elapsed * 0.35;
+        ctx.strokeStyle = `rgba(237, 233, 254, ${0.35 * (1 - t)})`;
+        ctx.lineWidth = 2;
+        ctx.beginPath();
+        ctx.moveTo(fx.x + Math.cos(ang) * rr * 0.88, fx.y + Math.sin(ang) * rr * 0.88);
+        ctx.lineTo(fx.x + Math.cos(ang) * rr * 1.02, fx.y + Math.sin(ang) * rr * 1.02);
+        ctx.stroke();
+      }
+    } else if (fx.type === "timelock") {
+      const phaseSelf = t < 0.5;
+      const localSelf = phaseSelf ? t / 0.5 : 1;
+      const fade = phaseSelf ? 1 : Math.max(0, 1 - (t - 0.5) * 2.2);
+      const pulse = 0.75 + 0.25 * (0.5 + 0.5 * Math.sin(state.elapsed * 14));
+      const spiralR = fx.radius * (0.35 + localSelf * 0.9) + pulse * 8;
+      drawCircle(ctx, fx.x, fx.y, spiralR, "#c084fc", (0.1 + (1 - localSelf) * 0.08) * fade);
+      ctx.strokeStyle = `rgba(233, 213, 255, ${(0.5 + 0.25 * (1 - localSelf)) * fade})`;
+      ctx.lineWidth = 3;
+      const coils = 3;
+      ctx.beginPath();
+      for (let i = 0; i <= 72; i++) {
+        const u = i / 72;
+        const ang = u * coils * TAU + state.elapsed * 3;
+        const rad = 8 + u * spiralR * 0.95;
+        const px = fx.x + Math.cos(ang) * rad;
+        const py = fx.y + Math.sin(ang) * rad;
+        if (i === 0) ctx.moveTo(px, py);
+        else ctx.lineTo(px, py);
+      }
+      ctx.stroke();
+      const tickN = 12;
+      for (let i = 0; i < tickN; i++) {
+        const ang = (i / tickN) * TAU - state.elapsed * 2;
+        ctx.strokeStyle = `rgba(250, 245, 255, ${0.55 * fade})`;
+        ctx.lineWidth = 2;
+        ctx.beginPath();
+        ctx.moveTo(fx.x + Math.cos(ang) * (player.r + 6), fx.y + Math.sin(ang) * (player.r + 6));
+        ctx.lineTo(fx.x + Math.cos(ang) * (player.r + 18), fx.y + Math.sin(ang) * (player.r + 18));
+        ctx.stroke();
+      }
+    } else if (fx.type === "healVitality") {
+      const pulse = 0.75 + 0.25 * (0.5 + 0.5 * Math.sin(state.elapsed * 16));
+      for (let ring = 0; ring < 3; ring++) {
+        const lag = ring * 0.12;
+        const tt = clamp((t - lag) / (1 - lag), 0, 1);
+        const rr = fx.radius * (0.25 + tt * 0.82);
+        drawCircle(ctx, fx.x, fx.y, rr, "#6ee7b7", 0.08 * (1 - tt) * (1 - ring * 0.2));
+        ctx.strokeStyle = `rgba(52, 211, 153, ${0.45 * (1 - tt) * pulse})`;
+        ctx.lineWidth = 4 - ring;
+        ctx.beginPath();
+        ctx.arc(fx.x, fx.y, rr, 0, TAU);
+        ctx.stroke();
+      }
+      const rays = 14;
+      for (let i = 0; i < rays; i++) {
+        const ang = (i / rays) * TAU + state.elapsed * 0.8;
+        const len = fx.radius * (0.4 + 0.55 * (1 - t));
+        ctx.strokeStyle = `rgba(167, 243, 208, ${0.4 * (1 - t)})`;
+        ctx.lineWidth = 2;
+        ctx.beginPath();
+        ctx.moveTo(fx.x, fx.y);
+        ctx.lineTo(fx.x + Math.cos(ang) * len, fx.y + Math.sin(ang) * len);
+        ctx.stroke();
+      }
+      if (t < 0.35) {
+        const b = 1 - t / 0.35;
+        drawCircle(ctx, fx.x, fx.y, player.r + 6 + b * 12, "#ecfdf5", 0.35 * b);
+      }
     }
   }
 
-  for (const shield of entities.shields) {
-    ctx.strokeStyle = "rgba(147, 197, 253, 0.28)";
-    ctx.lineWidth = 3;
+  const timelockWorldFrozenDraw =
+    state.timelockEnemyUntil > state.elapsed && state.elapsed >= state.timelockEnemyFrom;
+  if (timelockWorldFrozenDraw) {
+    const w = Math.max(VIEW_W, VIEW_H) * 0.85;
+    const v = 0.028 + 0.018 * Math.sin(state.elapsed * 11);
+    const g = ctx.createRadialGradient(player.x, player.y, player.r * 2, player.x, player.y, w);
+    g.addColorStop(0, `rgba(224, 231, 255, ${v * 0.35})`);
+    g.addColorStop(0.45, `rgba(99, 102, 241, ${v * 0.55})`);
+    g.addColorStop(1, "rgba(15, 23, 42, 0)");
+    ctx.fillStyle = g;
     ctx.beginPath();
-    ctx.arc(player.x, player.y, shield.radius, 0, TAU);
+    ctx.arc(player.x, player.y, w, 0, TAU);
+    ctx.fill();
+  }
+
+  if (entities.shields.length) {
+    const orbitR = entities.shields[0].radius;
+    ctx.strokeStyle = "rgba(147, 197, 253, 0.2)";
+    ctx.lineWidth = 2;
+    ctx.setLineDash([6, 10]);
+    ctx.lineDashOffset = -state.elapsed * 40;
+    ctx.beginPath();
+    ctx.arc(player.x, player.y, orbitR, 0, TAU);
     ctx.stroke();
-    drawCircle(ctx, shield.x, shield.y, shield.r + 7, "#bfdbfe", 0.22);
-    drawCircle(ctx, shield.x, shield.y, shield.r, "#93c5fd", 0.98);
-    ctx.strokeStyle = "rgba(255,255,255,0.7)";
+    ctx.setLineDash([]);
+  }
+  for (const shield of entities.shields) {
+    const spawnAge = shield.bornAt != null ? clamp((state.elapsed - shield.bornAt) / 0.34, 0, 1) : 1;
+    const pop = 0.2 + 0.8 * (1 - Math.pow(1 - spawnAge, 2.4));
+    const pulse = 0.9 + 0.1 * Math.sin(state.elapsed * 8 + shield.angle * 2.2);
+    const drawR = shield.r * pop * pulse;
+    const tx = -Math.sin(shield.angle);
+    const ty = Math.cos(shield.angle);
+    ctx.strokeStyle = "rgba(147, 197, 253, 0.35)";
+    ctx.lineWidth = 4;
+    ctx.beginPath();
+    ctx.moveTo(shield.x - tx * (drawR + 6), shield.y - ty * (drawR + 6));
+    ctx.lineTo(shield.x + tx * (drawR + 14), shield.y + ty * (drawR + 14));
+    ctx.stroke();
+    drawCircle(ctx, shield.x, shield.y, drawR + 9, "#bfdbfe", 0.28);
+    drawCircle(ctx, shield.x, shield.y, drawR + 4, "#e0f2fe", 0.45);
+    drawCircle(ctx, shield.x, shield.y, drawR, "#38bdf8", 0.95);
+    ctx.strokeStyle = "rgba(255,255,255,0.85)";
     ctx.lineWidth = 2;
     ctx.beginPath();
-    ctx.arc(shield.x, shield.y, shield.r + 1.5, 0, TAU);
+    ctx.arc(shield.x, shield.y, drawR + 1.2, 0, TAU);
     ctx.stroke();
   }
 
@@ -3401,12 +4116,42 @@ function render(tsMs) {
     ctx.beginPath();
     ctx.arc(player.x, player.y, player.r + 14 + timePulse * 5, 0, TAU);
     ctx.stroke();
+    ctx.save();
+    ctx.translate(player.x, player.y);
+    ctx.rotate(state.elapsed * 1.8);
+    const ticks = 16;
+    for (let i = 0; i < ticks; i++) {
+      const ang = (i / ticks) * TAU;
+      ctx.strokeStyle = `rgba(250, 245, 255, ${0.35 + 0.2 * timePulse})`;
+      ctx.lineWidth = 1.5;
+      ctx.beginPath();
+      ctx.moveTo(Math.cos(ang) * (player.r + 4), Math.sin(ang) * (player.r + 4));
+      ctx.lineTo(Math.cos(ang) * (player.r + 11 + timePulse * 3), Math.sin(ang) * (player.r + 11 + timePulse * 3));
+      ctx.stroke();
+    }
+    ctx.restore();
+    const sweep = (state.elapsed * 2.2) % TAU;
+    ctx.strokeStyle = "rgba(196, 181, 253, 0.55)";
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.arc(player.x, player.y, player.r + 9, sweep, sweep + Math.PI * 0.65);
+    ctx.stroke();
   } else if (state.tempHp > 0) {
     const p = 0.55 + 0.45 * (0.5 + 0.5 * Math.sin(state.elapsed * 10));
     ctx.strokeStyle = `rgba(52, 211, 153, ${0.35 + 0.25 * p})`;
     ctx.lineWidth = 2.5;
     ctx.beginPath();
     ctx.arc(player.x, player.y, player.r + 7 + p * 3, 0, TAU);
+    ctx.stroke();
+    ctx.strokeStyle = `rgba(167, 243, 208, ${0.28 * p})`;
+    ctx.lineWidth = 1.5;
+    ctx.beginPath();
+    ctx.arc(player.x, player.y, player.r + 11 + p * 4, 0, TAU);
+    ctx.stroke();
+    ctx.strokeStyle = `rgba(236, 253, 245, ${0.22 * p})`;
+    ctx.lineWidth = 1.2;
+    ctx.beginPath();
+    ctx.arc(player.x, player.y, player.r + 15 + p * 2, 0, TAU);
     ctx.stroke();
   }
   const heartsResistanceCount = getHeartsResistanceCardCount();
@@ -3468,13 +4213,17 @@ function render(tsMs) {
   }
   for (const popup of entities.healPopups) {
     const t = clamp((state.elapsed - popup.bornAt) / Math.max(0.001, popup.expiresAt - popup.bornAt), 0, 1);
-    const y = popup.y - t * 18;
-    ctx.fillStyle = popup.color;
+    const y = popup.y - t * 20;
+    const fp = popup.fontPx ?? 14;
+    ctx.fillStyle = popup.color || "#86efac";
     ctx.globalAlpha = 1 - t;
-    ctx.font = "bold 14px Arial";
+    ctx.font = `bold ${fp}px Arial`;
     ctx.textAlign = "center";
     ctx.textBaseline = "middle";
+    ctx.shadowColor = "rgba(15, 23, 42, 0.55)";
+    ctx.shadowBlur = 4;
     ctx.fillText(popup.text, popup.x, y);
+    ctx.shadowBlur = 0;
     ctx.globalAlpha = 1;
   }
   if (passive.heartsShieldArc > 0) {
@@ -3596,6 +4345,10 @@ function render(tsMs) {
     }
   }
   updateAbilityButtons();
+  if (dangerRampFillEl) {
+    const p = gameStarted ? getDangerRamp01() : 0;
+    dangerRampFillEl.style.width = `${p * 100}%`;
+  }
   if (state.elapsed < inventory.dodgeTextUntil) {
     ctx.fillStyle = "#e2e8f0";
     ctx.font = "bold 22px Arial";
@@ -3674,8 +4427,10 @@ window.addEventListener("keydown", (event) => {
   if (!gameStarted) return;
   // Restart must run before movement-resume / other guards so R never "sticks" after a card session.
   if (key === abilities.random.key && !state.running) {
-    resetGame();
     event.preventDefault();
+    gameStarted = false;
+    resetGame();
+    afterDeathRetry();
     return;
   }
   if (state.manualPause) {
