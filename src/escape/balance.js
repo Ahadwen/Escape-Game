@@ -136,12 +136,16 @@ export const ARENA_NEXUS_RING_LASER_SPAWN_INTERVAL = 2.85;
 export const ARENA_NEXUS_RING_SNIPER_SPAWN_INTERVAL = 3.45;
 /** After siege ends (green, defenders cleared), wait this long before opening the card reward modal. */
 export const ARENA_NEXUS_REWARD_MODAL_DELAY_SEC = 1.35;
-/** Rare special hex pool weight: `1/20` per first-time generated neighbor tile (when off cooldown and no active procedural special). */
-export const SPECIAL_HEX_POOL_WEIGHT = 1 / 20;
-/** After a procedural special is placed, this many subsequent newly generated tiles skip the roll (then 1/20 resumes). */
-export const PROCEDURAL_SPECIAL_COOLDOWN_TILES = 15;
 /** Procedural arena / roulette / surge hexes do not roll until this many seconds into the run (dev west test tile is separate, not from this roll). */
 export const PROCEDURAL_SPECIAL_HEX_MIN_ELAPSED_SEC = 15;
+/** Per new neighbor tile, spawn weight starts here after a used special (or run start), then decays toward END over `SPECIAL_SPAWN_DECAY_SEC`. */
+export const SPECIAL_SPAWN_WEIGHT_START = 1 / 30;
+/** Asymptotic / post–unused-despawn spawn weight for procedural specials. */
+export const SPECIAL_SPAWN_WEIGHT_END = 1 / 10;
+/** Seconds over which weight ramps from START to END (counting from `specialSpawnRateEpochStart`). */
+export const SPECIAL_SPAWN_DECAY_SEC = 20;
+/** No spawn rolls on new tiles for this many seconds after a special is used or after one despawns unused. */
+export const SPECIAL_SPAWN_COOLDOWN_SEC = 15;
 /** ~1in at 96 CSS px/in: inner rainbow forge disc radius (px). */
 export const ROULETTE_INNER_HIT_R = 52;
 export const ROULETTE_INNER_HEX_DRAW_R = 46;
@@ -167,3 +171,13 @@ export const SURGE_SAFE_HEX_DRAW_R = 81;
 export const SURGE_SAFE_HIT_R = 99;
 /** Min center-to-center distance from the previous wave’s safe pocket (one draw-radius “bubble” diameter). */
 export const SURGE_SAFE_MIN_CENTER_SEP_PX = SURGE_SAFE_HEX_DRAW_R * 2;
+
+/** Standing in the safehouse inner “core” (opens level prompt). */
+export const SAFEHOUSE_INNER_HIT_R = 46;
+
+/** Interaction radius for embedded mini rainbow / forge sites (px). */
+export const SAFEHOUSE_EMBED_SITE_HIT_R = 28;
+/** How far mini centers sit from sanctuary center toward west / east (fraction of HEX_SIZE along neighbor chord). */
+export const SAFEHOUSE_EMBED_CENTER_INSET = 0.4;
+/** Pointy-hex vertex radius for embedded mini sites vs full `HEX_SIZE`. */
+export const SAFEHOUSE_EMBED_HEX_VERTEX_R_MULT = 0.14;

@@ -1,4 +1,5 @@
 import { TAU, HEAL_PICKUP_PLUS_HALF, HEAL_PICKUP_ARM_THICK } from "./constants.js";
+import { HEX_SIZE, SURGE_SAFE_HEX_DRAW_R } from "./balance.js";
 
 export function drawCircle(ctx, x, y, r, color, alpha = 1) {
   ctx.save();
@@ -71,7 +72,7 @@ export function strokePointyHexOutline(ctx, cx, cy, vertexRadius, strokeStyle, l
 }
 
 /** Rainbow fill for roulette hex; `elapsed` drives spin (game seconds). */
-export function fillPointyHexRainbowGlow(ctx, cx, cy, vertexRadius, elapsed) {
+export function fillPointyHexRainbowGlow(ctx, cx, cy, vertexRadius, elapsed, drawOutline = true, fillAlphaScale = 1) {
   ctx.save();
   ctx.beginPath();
   for (let i = 0; i < 6; i++) {
@@ -90,11 +91,164 @@ export function fillPointyHexRainbowGlow(ctx, cx, cy, vertexRadius, elapsed) {
   } else {
     ctx.fillStyle = `hsla(${(elapsed * 110) % 360}, 92%, 58%, 0.55)`;
   }
-  ctx.globalAlpha = 0.52;
+  ctx.globalAlpha = 0.52 * fillAlphaScale;
   ctx.fill();
   ctx.globalAlpha = 1;
-  ctx.strokeStyle = "rgba(255,255,255,0.35)";
-  ctx.lineWidth = 1.5;
-  ctx.stroke();
+  if (drawOutline) {
+    ctx.strokeStyle = `rgba(255,255,255,${0.35 * fillAlphaScale})`;
+    ctx.lineWidth = 1.5;
+    ctx.stroke();
+  }
+  ctx.restore();
+}
+
+/** Safehouse: radial fill, wisps, solid core hex + soft moving “dark water” shimmer (screen sheen) inside core. */
+export function drawSafehouseHexCell(ctx, cx, cy, vertexRadius, elapsed) {
+  const innerVertexR = (vertexRadius * SURGE_SAFE_HEX_DRAW_R) / HEX_SIZE;
+  const coreFill = "rgba(15, 23, 42, 0.94)";
+  ctx.save();
+  ctx.beginPath();
+  for (let i = 0; i < 6; i++) {
+    const a = -Math.PI / 2 + (Math.PI / 3) * i;
+    const x = cx + Math.cos(a) * vertexRadius;
+    const y = cy + Math.sin(a) * vertexRadius;
+    if (i === 0) ctx.moveTo(x, y);
+    else ctx.lineTo(x, y);
+  }
+  ctx.closePath();
+  ctx.clip();
+  const outerGradR = vertexRadius * 0.98;
+  const g = ctx.createRadialGradient(cx, cy, 0, cx, cy, outerGradR);
+  g.addColorStop(0, coreFill);
+  g.addColorStop(0.12, "rgba(15, 23, 42, 0.9)");
+  g.addColorStop(0.28, "rgba(30, 41, 59, 0.42)");
+  g.addColorStop(0.4, "rgba(51, 65, 85, 0.32)");
+  g.addColorStop(0.52, "rgba(100, 116, 139, 0.38)");
+  g.addColorStop(0.62, "rgba(148, 163, 184, 0.46)");
+  g.addColorStop(0.7, "rgba(186, 198, 214, 0.55)");
+  g.addColorStop(0.78, "rgba(226, 232, 240, 0.72)");
+  g.addColorStop(0.86, "rgba(248, 250, 252, 0.9)");
+  g.addColorStop(0.93, "rgba(255, 255, 255, 0.97)");
+  g.addColorStop(1, "rgba(255, 255, 255, 0.99)");
+  ctx.fillStyle = g;
+  ctx.fill();
+  const nWisps = 14;
+  for (let w = 0; w < nWisps; w++) {
+    const drift = elapsed * 0.48 + w * (TAU / nWisps) + w * 0.31;
+    const radial = 0.72 + 0.12 * Math.sin(elapsed * 0.9 + w * 0.7) + (w % 4) * 0.018;
+    const px = cx + Math.cos(drift) * vertexRadius * radial + Math.sin(elapsed * 1.15 + w * 0.9) * 4;
+    const py = cy + Math.sin(drift * 0.85) * vertexRadius * radial + Math.cos(elapsed * 0.95 + w * 0.6) * 3;
+    const smokeR = vertexRadius * (0.14 + 0.06 * Math.sin(elapsed * 2.2 + w * 1.1));
+    const sg = ctx.createRadialGradient(px, py, 0, px, py, smokeR);
+    sg.addColorStop(0, "rgba(148, 163, 184, 0.12)");
+    sg.addColorStop(0.5, "rgba(148, 163, 184, 0.06)");
+    sg.addColorStop(1, "rgba(148, 163, 184, 0)");
+    ctx.fillStyle = sg;
+    ctx.beginPath();
+    ctx.arc(px, py, smokeR, 0, TAU);
+    ctx.fill();
+  }
+  ctx.beginPath();
+  for (let i = 0; i < 6; i++) {
+    const a = -Math.PI / 2 + (Math.PI / 3) * i;
+    const x = cx + Math.cos(a) * innerVertexR;
+    const y = cy + Math.sin(a) * innerVertexR;
+    if (i === 0) ctx.moveTo(x, y);
+    else ctx.lineTo(x, y);
+  }
+  ctx.closePath();
+  ctx.fillStyle = coreFill;
+  ctx.fill();
+  ctx.save();
+  ctx.beginPath();
+  for (let i = 0; i < 6; i++) {
+    const a = -Math.PI / 2 + (Math.PI / 3) * i;
+    const x = cx + Math.cos(a) * innerVertexR;
+    const y = cy + Math.sin(a) * innerVertexR;
+    if (i === 0) ctx.moveTo(x, y);
+    else ctx.lineTo(x, y);
+  }
+  ctx.closePath();
+  ctx.clip();
+  const pad = innerVertexR * 2.8;
+  const t = elapsed;
+  const hx = Math.cos(t * 0.62) * innerVertexR * 0.42;
+  const hy = Math.sin(t * 0.48 + 0.7) * innerVertexR * 0.36;
+  const sh1 = ctx.createRadialGradient(cx + hx, cy + hy, 0, cx + hx * 0.15, cy + hy * 0.12, innerVertexR * 1.45);
+  sh1.addColorStop(0, "rgba(190, 220, 235, 0.5)");
+  sh1.addColorStop(0.38, "rgba(56, 100, 128, 0.18)");
+  sh1.addColorStop(1, "rgba(15, 23, 42, 0)");
+  ctx.globalCompositeOperation = "screen";
+  ctx.globalAlpha = 0.16;
+  ctx.fillStyle = sh1;
+  ctx.fillRect(cx - pad, cy - pad, pad * 2, pad * 2);
+  const hx2 = Math.cos(t * 0.38 + 2.2) * innerVertexR * 0.33;
+  const hy2 = Math.sin(t * 0.71 + 1.1) * innerVertexR * 0.4;
+  const sh2 = ctx.createRadialGradient(cx + hx2, cy + hy2, 0, cx, cy, innerVertexR * 1.05);
+  sh2.addColorStop(0, "rgba(165, 200, 218, 0.35)");
+  sh2.addColorStop(0.5, "rgba(30, 55, 75, 0.08)");
+  sh2.addColorStop(1, "rgba(15, 23, 42, 0)");
+  ctx.globalAlpha = 0.11;
+  ctx.fillStyle = sh2;
+  ctx.fillRect(cx - pad, cy - pad, pad * 2, pad * 2);
+  ctx.globalAlpha = 1;
+  ctx.globalCompositeOperation = "source-over";
+  ctx.restore();
+  ctx.restore();
+  strokePointyHexOutline(ctx, cx, cy, vertexRadius, "rgba(255, 255, 255, 0.94)", 3.4, 14);
+}
+
+/**
+ * Sanctuary add-ons: **only** the inner rainbow disc (same as roulette inner) on the left, and a forge hex on the right
+ * at the **same** vertex scale.
+ */
+export function drawSafehouseEmbeddedFacilities(ctx, opts) {
+  const {
+    rouletteX,
+    rouletteY,
+    forgeX,
+    forgeY,
+    vertexRadius,
+    elapsed,
+    embeddedRouletteComplete,
+    embeddedForgeComplete = false,
+  } = opts;
+  ctx.save();
+  if (embeddedRouletteComplete) {
+    fillPointyHexRainbowGlow(ctx, rouletteX, rouletteY, vertexRadius, elapsed, false, 0.34);
+  } else {
+    fillPointyHexRainbowGlow(ctx, rouletteX, rouletteY, vertexRadius, elapsed, false);
+  }
+  ctx.restore();
+  drawForgeHexCell(ctx, forgeX, forgeY, vertexRadius, elapsed, !!embeddedForgeComplete);
+}
+
+/** Small forge satellite: warm metal frame + soft ember core. */
+export function drawForgeHexCell(ctx, cx, cy, vertexRadius, elapsed, spentLook = false) {
+  const t = elapsed;
+  const lwOut = Math.max(1.1, Math.min(3.1, vertexRadius * 0.16));
+  const lwIn = Math.max(0.9, lwOut * 0.52);
+  const outStroke = spentLook ? "rgba(55, 48, 36, 0.92)" : "rgba(180, 83, 9, 0.95)";
+  const inStroke = spentLook ? "rgba(71, 85, 105, 0.45)" : "rgba(253, 224, 71, 0.55)";
+  strokePointyHexOutline(ctx, cx, cy, vertexRadius, outStroke, lwOut, Math.min(12, vertexRadius * 0.45));
+  strokePointyHexOutline(ctx, cx, cy, vertexRadius * 0.88, inStroke, lwIn, Math.min(6, vertexRadius * 0.28));
+  const pulse = spentLook ? 0.35 : 0.5 + 0.5 * Math.sin(t * 2.4);
+  const coreR = vertexRadius * 0.42;
+  const g = ctx.createRadialGradient(cx, cy, 0, cx, cy, coreR * 1.6);
+  g.addColorStop(0, `rgba(254, 243, 199, ${spentLook ? 0.08 : 0.35 + 0.2 * pulse})`);
+  g.addColorStop(0.45, spentLook ? "rgba(30, 27, 20, 0.72)" : "rgba(120, 53, 15, 0.55)");
+  g.addColorStop(1, "rgba(30, 20, 12, 0.2)");
+  ctx.save();
+  ctx.beginPath();
+  for (let i = 0; i < 6; i++) {
+    const a = -Math.PI / 2 + (Math.PI / 3) * i;
+    const x = cx + Math.cos(a) * vertexRadius * 0.78;
+    const y = cy + Math.sin(a) * vertexRadius * 0.78;
+    if (i === 0) ctx.moveTo(x, y);
+    else ctx.lineTo(x, y);
+  }
+  ctx.closePath();
+  ctx.fillStyle = g;
+  ctx.fill();
   ctx.restore();
 }

@@ -72,9 +72,11 @@ import {
   ARENA_NEXUS_RING_LASER_SPAWN_INTERVAL,
   ARENA_NEXUS_RING_SNIPER_SPAWN_INTERVAL,
   ARENA_NEXUS_REWARD_MODAL_DELAY_SEC,
-  SPECIAL_HEX_POOL_WEIGHT,
-  PROCEDURAL_SPECIAL_COOLDOWN_TILES,
   PROCEDURAL_SPECIAL_HEX_MIN_ELAPSED_SEC,
+  SPECIAL_SPAWN_WEIGHT_START,
+  SPECIAL_SPAWN_WEIGHT_END,
+  SPECIAL_SPAWN_DECAY_SEC,
+  SPECIAL_SPAWN_COOLDOWN_SEC,
   ROULETTE_INNER_HIT_R,
   ROULETTE_INNER_HEX_DRAW_R,
   ROULETTE_SPIN_SHUFFLE_SEC,
@@ -88,7 +90,16 @@ import {
   SURGE_SAFE_HEX_DRAW_R,
   SURGE_SAFE_HIT_R,
   SURGE_SAFE_MIN_CENTER_SEP_PX,
+  SAFEHOUSE_INNER_HIT_R,
+  SAFEHOUSE_EMBED_SITE_HIT_R,
+  SAFEHOUSE_EMBED_CENTER_INSET,
+  SAFEHOUSE_EMBED_HEX_VERTEX_R_MULT,
 } from "./balance.js";
+
+/** Safehouse “level up” freeze + overlay duration (ms). */
+const RUN_LEVEL_UP_CINEMATIC_MS = 2800;
+/** Sanctuary tile darken when marked spent (ms). */
+const SAFEHOUSE_SPENT_TILE_ANIM_MS = 1200;
 import { hexToWorld, worldToHex, hexKey } from "./hex-math.js";
 import { createRunLog } from "./dev/run-log.js";
 import * as LogCodes from "./dev/log-codes.js";
@@ -100,6 +111,8 @@ import {
   drawObstacles,
   strokePointyHexOutline,
   fillPointyHexRainbowGlow,
+  drawSafehouseHexCell,
+  drawSafehouseEmbeddedFacilities,
 } from "./draw.js";
 
 export function mountEscape({
@@ -127,6 +140,13 @@ export function mountEscape({
   rouletteModalSub = null,
   rouletteModalSpinRow = null,
   rouletteModalActions = null,
+  forgeModalEl = null,
+  forgeModalTitleEl = null,
+  forgeModalSubEl = null,
+  forgeModalActionsEl = null,
+  safehouseLevelModalEl = null,
+  safehouseLevelYesBtn = null,
+  safehouseLevelNoBtn = null,
   /** Dev/test: `<select>` for which special tile (if any) is forced west of spawn; disabled while `gameStarted`. */
   specialTestWestSelect = null,
 } = {}) {
@@ -141,6 +161,19 @@ export function mountEscape({
   })();
   const runLog = createRunLog({ enabled: escapeLocalDevHost });
   runLog.event(LogCodes.EVT_SESSION_START, "Escape session mounted", { sessionId: runLog.sessionId });
+  const forgeModal = forgeModalEl ?? (typeof document !== "undefined" ? document.getElementById("forge-modal") : null);
+  const forgeModalTitle = forgeModalTitleEl ?? (typeof document !== "undefined" ? document.getElementById("forge-modal-title") : null);
+  const forgeModalSub = forgeModalSubEl ?? (typeof document !== "undefined" ? document.getElementById("forge-modal-sub") : null);
+  const forgeModalActions = forgeModalActionsEl ?? (typeof document !== "undefined" ? document.getElementById("forge-modal-actions") : null);
+  const forgeModalInventory =
+    typeof document !== "undefined" ? document.getElementById("forge-modal-inventory") : null;
+  const forgeSlotLeft = typeof document !== "undefined" ? document.getElementById("forge-slot-left") : null;
+  const forgeSlotRight = typeof document !== "undefined" ? document.getElementById("forge-slot-right") : null;
+  const forgePreviewValue = typeof document !== "undefined" ? document.getElementById("forge-preview-value") : null;
+  const forgeModalHint = typeof document !== "undefined" ? document.getElementById("forge-modal-hint") : null;
+  const safehouseLevelModal = safehouseLevelModalEl ?? (typeof document !== "undefined" ? document.getElementById("safehouse-level-modal") : null);
+  const safehouseLevelYes = safehouseLevelYesBtn ?? (typeof document !== "undefined" ? document.getElementById("safehouse-level-yes") : null);
+  const safehouseLevelNo = safehouseLevelNoBtn ?? (typeof document !== "undefined" ? document.getElementById("safehouse-level-no") : null);
   if (escapeLocalDevHost) {
     const runLogPrintBtn = document.getElementById("run-log-print-console");
     const runLogDownloadBtn = document.getElementById("run-log-download-txt");
@@ -176,6 +209,26 @@ let lastPlayerHexKey = null;
 
 const tileCache = new Map();
 
+function getProceduralSpecialSpawnWeight() {
+  const e = state.elapsed;
+  if (e < PROCEDURAL_SPECIAL_HEX_MIN_ELAPSED_SEC) return 0;
+  if (e < state.specialSpawnCooldownUntil) return 0;
+  if (state.specialSpawnHoldMaxRate) return SPECIAL_SPAWN_WEIGHT_END;
+  const u = clamp((e - state.specialSpawnRateEpochStart) / SPECIAL_SPAWN_DECAY_SEC, 0, 1);
+  return SPECIAL_SPAWN_WEIGHT_START + (SPECIAL_SPAWN_WEIGHT_END - SPECIAL_SPAWN_WEIGHT_START) * u;
+}
+
+function notifyProceduralSpecialTileUsedForSpawnSchedule() {
+  state.specialSpawnCooldownUntil = state.elapsed + SPECIAL_SPAWN_COOLDOWN_SEC;
+  state.specialSpawnHoldMaxRate = false;
+  state.specialSpawnRateEpochStart = state.specialSpawnCooldownUntil;
+}
+
+function notifyProceduralSpecialTileUnusedDespawned() {
+  state.specialSpawnCooldownUntil = state.elapsed + SPECIAL_SPAWN_COOLDOWN_SEC;
+  state.specialSpawnHoldMaxRate = true;
+}
+
 /** When an arena nexus hex leaves the active 7-tile window, clear global arena run state so it can fire again on return. */
 function resetArenaNexusIfArenaHexEvicted(cacheKey) {
   const parts = cacheKey.split(",");
@@ -203,6 +256,65 @@ function resetArenaNexusIfArenaHexEvicted(cacheKey) {
   state.arenaSiegeEndAt = 0;
   state.arenaNextLaserEnemyAt = 0;
   state.arenaNextSniperEnemyAt = 0;
+
+  const hadActive = state.proceduralArenaKeys.has(k);
+  state.proceduralArenaKeys.delete(k);
+  state.proceduralArenaSpentKeys.delete(k);
+  if (hadActive) notifyProceduralSpecialTileUnusedDespawned();
+}
+
+function resetSafehouseEmbeddedProgress() {
+  state.safehouseInnerFacilitiesUnlocked = false;
+  state.safehouseEmbeddedRouletteComplete = false;
+  state.safehouseEmbeddedForgeComplete = false;
+  state.safehouseEmbedRevealAtMs = 0;
+  state.forgeInnerExitLatch = false;
+  state.safehouseLevelInnerLatch = false;
+  state.safehouseAwaitingLeaveAfterLevelUp = false;
+  state.safehouseLevelUpTileKey = "";
+}
+
+function markProceduralSafehouseHexSpent(q, r) {
+  const k = hexKey(q, r);
+  const isDev =
+    escapeLocalDevHost && state.testWestKind === "safehouse" && q === state.testWestQ && r === state.testWestR;
+  if (state.proceduralSafehouseKeys.has(k)) {
+    state.proceduralSafehouseKeys.delete(k);
+    state.proceduralSafehouseSpentKeys.add(k);
+    resetSafehouseEmbeddedProgress();
+    state.safehouseSpentTileAnim = { key: k, startMs: performance.now() };
+    notifyProceduralSpecialTileUsedForSpawnSchedule();
+  } else if (isDev) {
+    state.proceduralSafehouseSpentKeys.add(k);
+    resetSafehouseEmbeddedProgress();
+    state.safehouseSpentTileAnim = { key: k, startMs: performance.now() };
+    notifyProceduralSpecialTileUsedForSpawnSchedule();
+  }
+}
+
+function resetSafehouseIfSafehouseHexEvicted(cacheKey) {
+  const parts = cacheKey.split(",");
+  if (parts.length !== 2) return;
+  const q = Number(parts[0]);
+  const r = Number(parts[1]);
+  if (!Number.isFinite(q) || !Number.isFinite(r)) return;
+  const k = hexKey(q, r);
+  const isSafe =
+    state.proceduralSafehouseKeys.has(k) ||
+    state.proceduralSafehouseSpentKeys.has(k) ||
+    (escapeLocalDevHost && state.testWestKind === "safehouse" && q === state.testWestQ && r === state.testWestR);
+  if (!isSafe) return;
+  const hadActiveSafe = state.proceduralSafehouseKeys.has(k);
+  state.proceduralSafehouseKeys.delete(k);
+  state.proceduralSafehouseSpentKeys.delete(k);
+  state.safehouseLevelPromptShownKeys.delete(k);
+  if (state.safehouseLevelUpTileKey === k) {
+    state.safehouseAwaitingLeaveAfterLevelUp = false;
+    state.safehouseLevelUpTileKey = "";
+  }
+  if (state.safehouseSpentTileAnim?.key === k) state.safehouseSpentTileAnim = null;
+  resetSafehouseEmbeddedProgress();
+  if (hadActiveSafe) notifyProceduralSpecialTileUnusedDespawned();
 }
 
 function resetSurgeHexIfSurgeHexEvicted(cacheKey) {
@@ -241,6 +353,57 @@ function resetSurgeHexIfSurgeHexEvicted(cacheKey) {
     state.surgeEligibleForInnerExitReward = false;
     state.surgeCardRewardAt = 0;
   }
+  const hadActiveSurge = state.proceduralSurgeKeys.has(k);
+  state.proceduralSurgeKeys.delete(k);
+  state.proceduralSurgeSpentKeys.delete(k);
+  if (hadActiveSurge) notifyProceduralSpecialTileUnusedDespawned();
+}
+
+function resetRouletteHexIfRouletteHexEvicted(cacheKey) {
+  const parts = cacheKey.split(",");
+  if (parts.length !== 2) return;
+  const q = Number(parts[0]);
+  const r = Number(parts[1]);
+  if (!Number.isFinite(q) || !Number.isFinite(r)) return;
+  const k = hexKey(q, r);
+  const isRoulette =
+    state.proceduralRouletteKeys.has(k) ||
+    state.proceduralRouletteSpentKeys.has(k) ||
+    (escapeLocalDevHost && state.testWestKind === "roulette" && q === state.testWestQ && r === state.testWestR);
+  if (!isRoulette) return;
+
+  const hadActiveRoulette = state.proceduralRouletteKeys.has(k);
+  if (state.rouletteLockQ === q && state.rouletteLockR === r) {
+    if (state.pausedForRoulette) closeRouletteForgeUi();
+    state.roulettePhase = 0;
+    state.rouletteForgeComplete = false;
+    state.rouletteInnerExitLatch = false;
+    state.rouletteWasInHex = false;
+    state.rouletteScreenFlashUntil = 0;
+    state.rouletteLockQ = 0;
+    state.rouletteLockR = 0;
+  }
+  state.proceduralRouletteKeys.delete(k);
+  state.proceduralRouletteSpentKeys.delete(k);
+  state.rouletteOuterDamageAppliedKeys.delete(k);
+  if (hadActiveRoulette) notifyProceduralSpecialTileUnusedDespawned();
+}
+
+/** If a procedural anchor is not in the 7-hex window, clear it (same as tile eviction). Fixes orphan keys vs `tileCache`. */
+function purgeProceduralSpecialAnchorsOutsideWindow(neededKeys) {
+  const purgeSet = (keys, resetFn) => {
+    for (const k of Array.from(keys)) {
+      if (!neededKeys.has(k)) resetFn(k);
+    }
+  };
+  purgeSet(state.proceduralSafehouseKeys, resetSafehouseIfSafehouseHexEvicted);
+  purgeSet(state.proceduralSafehouseSpentKeys, resetSafehouseIfSafehouseHexEvicted);
+  purgeSet(state.proceduralArenaKeys, resetArenaNexusIfArenaHexEvicted);
+  purgeSet(state.proceduralArenaSpentKeys, resetArenaNexusIfArenaHexEvicted);
+  purgeSet(state.proceduralRouletteKeys, resetRouletteHexIfRouletteHexEvicted);
+  purgeSet(state.proceduralRouletteSpentKeys, resetRouletteHexIfRouletteHexEvicted);
+  purgeSet(state.proceduralSurgeKeys, resetSurgeHexIfSurgeHexEvicted);
+  purgeSet(state.proceduralSurgeSpentKeys, resetSurgeHexIfSurgeHexEvicted);
 }
 
 function ensureTilesForPlayer() {
@@ -257,7 +420,11 @@ function ensureTilesForPlayer() {
     if (!tileCache.has(key)) {
       tryProceduralRareSpecialHex(h.q, h.r);
       const c = hexToWorld(h.q, h.r);
-      const emptyTerrain = isArenaNexusTile(h.q, h.r) || isRouletteHexTile(h.q, h.r) || isSurgeHexTile(h.q, h.r);
+      const emptyTerrain =
+        isArenaNexusTile(h.q, h.r) ||
+        isRouletteHexTile(h.q, h.r) ||
+        isSurgeHexTile(h.q, h.r) ||
+        isSafehouseHexTile(h.q, h.r);
       tileCache.set(
         key,
         generateHexTileObstacles(h.q, h.r, {
@@ -278,9 +445,12 @@ function ensureTilesForPlayer() {
     if (!neededKeys.has(key)) {
       resetArenaNexusIfArenaHexEvicted(key);
       resetSurgeHexIfSurgeHexEvicted(key);
+      resetSafehouseIfSafehouseHexEvicted(key);
+      resetRouletteHexIfRouletteHexEvicted(key);
       tileCache.delete(key);
     }
   }
+  purgeProceduralSpecialAnchorsOutsideWindow(neededKeys);
 
   obstacles = [];
   for (const h of needed) {
@@ -291,7 +461,7 @@ function ensureTilesForPlayer() {
 function readTestSpecialWestSelection() {
   if (!escapeLocalDevHost) return "na";
   const raw = String(specialTestWestSelect?.value ?? "na").toLowerCase();
-  if (raw === "arena" || raw === "roulette" || raw === "surge") return raw;
+  if (raw === "arena" || raw === "roulette" || raw === "surge" || raw === "safehouse") return raw;
   return "na";
 }
 
@@ -309,15 +479,29 @@ function initSpecialHexTiles(spawnQ, spawnR) {
   state.testWestQ = westQ;
   state.testWestR = westR;
   const mode = readTestSpecialWestSelection();
-  state.testWestKind = mode === "arena" ? "arena" : mode === "roulette" ? "roulette" : mode === "surge" ? "surge" : "none";
+  state.testWestKind =
+    mode === "arena"
+      ? "arena"
+      : mode === "roulette"
+        ? "roulette"
+        : mode === "surge"
+          ? "surge"
+          : mode === "safehouse"
+            ? "safehouse"
+            : "none";
 
   state.proceduralArenaKeys.clear();
   state.proceduralRouletteKeys.clear();
   state.proceduralSurgeKeys.clear();
+  state.proceduralSafehouseKeys.clear();
+  state.proceduralSafehouseSpentKeys.clear();
   state.proceduralArenaSpentKeys.clear();
   state.proceduralRouletteSpentKeys.clear();
   state.proceduralSurgeSpentKeys.clear();
-  state.proceduralSpecialCooldownTiles = 0;
+  state.rouletteOuterDamageAppliedKeys.clear();
+  state.specialSpawnCooldownUntil = 0;
+  state.specialSpawnHoldMaxRate = false;
+  state.specialSpawnRateEpochStart = PROCEDURAL_SPECIAL_HEX_MIN_ELAPSED_SEC;
   state.arenaSiegeQ = spawnQ;
   state.arenaSiegeR = spawnR;
   state.arenaPhase = 0;
@@ -357,6 +541,15 @@ function initSpecialHexTiles(spawnQ, spawnR) {
   state.surgeCardRewardAt = 0;
   state.rouletteLockQ = 0;
   state.rouletteLockR = 0;
+  state.safehouseInnerFacilitiesUnlocked = false;
+  state.safehouseEmbeddedRouletteComplete = false;
+  state.safehouseEmbeddedForgeComplete = false;
+  state.safehouseLevelPromptShownKeys.clear();
+  state.safehouseEmbedRevealAtMs = 0;
+  state.safehouseAwaitingLeaveAfterLevelUp = false;
+  state.safehouseLevelUpTileKey = "";
+  state.runLevelUpCinematic = null;
+  state.safehouseSpentTileAnim = null;
 }
 
 function markProceduralArenaHexSpent(q, r) {
@@ -364,6 +557,7 @@ function markProceduralArenaHexSpent(q, r) {
   if (!state.proceduralArenaKeys.has(k)) return;
   state.proceduralArenaKeys.delete(k);
   state.proceduralArenaSpentKeys.add(k);
+  notifyProceduralSpecialTileUsedForSpawnSchedule();
 }
 
 function markProceduralRouletteHexSpent(q, r) {
@@ -371,6 +565,8 @@ function markProceduralRouletteHexSpent(q, r) {
   if (!state.proceduralRouletteKeys.has(k)) return;
   state.proceduralRouletteKeys.delete(k);
   state.proceduralRouletteSpentKeys.add(k);
+  state.rouletteOuterDamageAppliedKeys.delete(k);
+  notifyProceduralSpecialTileUsedForSpawnSchedule();
 }
 
 function markProceduralSurgeHexSpent(q, r) {
@@ -378,6 +574,7 @@ function markProceduralSurgeHexSpent(q, r) {
   if (!state.proceduralSurgeKeys.has(k)) return;
   state.proceduralSurgeKeys.delete(k);
   state.proceduralSurgeSpentKeys.add(k);
+  notifyProceduralSpecialTileUsedForSpawnSchedule();
 }
 
 function firstProceduralArenaAxial() {
@@ -501,6 +698,266 @@ function isSurgeHexInteractive(q, r) {
   if (state.proceduralSurgeKeys.has(hexKey(q, r))) return true;
   if (escapeLocalDevHost && state.testWestKind === "surge" && q === state.testWestQ && r === state.testWestR) return true;
   return false;
+}
+
+function collectSafehouseHexAxials() {
+  const out = [];
+  const seen = new Set();
+  const add = (q, r) => {
+    const kk = hexKey(q, r);
+    if (seen.has(kk)) return;
+    seen.add(kk);
+    out.push({ q, r });
+  };
+  for (const k of state.proceduralSafehouseKeys) {
+    const [q, r] = k.split(",").map(Number);
+    add(q, r);
+  }
+  for (const k of state.proceduralSafehouseSpentKeys) {
+    const [q, r] = k.split(",").map(Number);
+    add(q, r);
+  }
+  if (escapeLocalDevHost && state.testWestKind === "safehouse") add(state.testWestQ, state.testWestR);
+  return out;
+}
+
+function isSafehouseHexActiveTile(q, r) {
+  const k = hexKey(q, r);
+  if (state.proceduralSafehouseSpentKeys.has(k)) return false;
+  if (state.proceduralSafehouseKeys.has(k)) return true;
+  if (escapeLocalDevHost && state.testWestKind === "safehouse" && q === state.testWestQ && r === state.testWestR) return true;
+  return false;
+}
+
+function isSafehouseHexSpentTile(q, r) {
+  return state.proceduralSafehouseSpentKeys.has(hexKey(q, r));
+}
+
+function isSafehouseHexTile(q, r) {
+  return isSafehouseHexActiveTile(q, r) || isSafehouseHexSpentTile(q, r);
+}
+
+/** Point inside safehouse hex footprint (pointy hex ≈ circumdisk); used for barriers / LoS. */
+function isWorldPointOnSafehouseBarrierDisk(x, y) {
+  const h = worldToHex(x, y);
+  if (!isSafehouseHexTile(h.q, h.r)) return false;
+  const c = hexToWorld(h.q, h.r);
+  return Math.hypot(x - c.x, y - c.y) <= HEX_SIZE + 4;
+}
+
+function clampHunterOutsideSafehouseDisks(h) {
+  if (h.arenaNexusSpawn) return;
+  const minPad = 3;
+  const applyPush = (cx, cy) => {
+    const dx = h.x - cx;
+    const dy = h.y - cy;
+    const d = Math.hypot(dx, dy) || 1;
+    const minDist = HEX_SIZE + h.r + minPad;
+    if (d < minDist) {
+      h.x = cx + (dx / d) * minDist;
+      h.y = cy + (dy / d) * minDist;
+    }
+  };
+  for (const k of state.proceduralSafehouseKeys) {
+    const [q, r] = k.split(",").map(Number);
+    const c = hexToWorld(q, r);
+    applyPush(c.x, c.y);
+  }
+  for (const k of state.proceduralSafehouseSpentKeys) {
+    const [q, r] = k.split(",").map(Number);
+    const c = hexToWorld(q, r);
+    applyPush(c.x, c.y);
+  }
+  if (escapeLocalDevHost && state.testWestKind === "safehouse") {
+    const c = hexToWorld(state.testWestQ, state.testWestR);
+    applyPush(c.x, c.y);
+  }
+}
+
+function getSafehouseEmbeddedRouletteWorld(prim) {
+  const c = hexToWorld(prim.q, prim.r);
+  const w = hexToWorld(prim.q + HEX_DIRS[3].q, prim.r + HEX_DIRS[3].r);
+  const t = HEX_SIZE * SAFEHOUSE_EMBED_CENTER_INSET;
+  const len = Math.hypot(w.x - c.x, w.y - c.y) || 1;
+  return { x: c.x + ((w.x - c.x) / len) * t, y: c.y + ((w.y - c.y) / len) * t };
+}
+
+function getSafehouseEmbeddedForgeWorld(prim) {
+  const c = hexToWorld(prim.q, prim.r);
+  const e = hexToWorld(prim.q + HEX_DIRS[0].q, prim.r + HEX_DIRS[0].r);
+  const t = HEX_SIZE * SAFEHOUSE_EMBED_CENTER_INSET;
+  const len = Math.hypot(e.x - c.x, e.y - c.y) || 1;
+  return { x: c.x + ((e.x - c.x) / len) * t, y: c.y + ((e.y - c.y) / len) * t };
+}
+
+function safehouseEmbeddedMiniVertexRadius() {
+  return HEX_SIZE * SAFEHOUSE_EMBED_HEX_VERTEX_R_MULT;
+}
+
+/** Stand on mini rainbow / forge (slightly generous vs drawn apothem). */
+function safehouseEmbedSiteHitR() {
+  return Math.max(SAFEHOUSE_EMBED_SITE_HIT_R, safehouseEmbeddedMiniVertexRadius() * (SQRT3 / 2) * 1.08);
+}
+
+function drawSafehouseHexWorld(ctx) {
+  const cells = collectSafehouseHexAxials();
+  if (!cells.length) return;
+  const activePrim = getPrimarySafehouseAxial();
+  const prim =
+    state.safehouseInnerFacilitiesUnlocked && activePrim && isSafehouseHexActiveTile(activePrim.q, activePrim.r)
+      ? activePrim
+      : null;
+  for (const { q, r } of cells) {
+    const c = hexToWorld(q, r);
+    drawSafehouseHexCell(ctx, c.x, c.y, HEX_SIZE, state.elapsed);
+    const kk = hexKey(q, r);
+    if (state.proceduralSafehouseSpentKeys.has(kk)) {
+      const fx = state.safehouseSpentTileAnim;
+      let u = 1;
+      if (fx && fx.key === kk) {
+        const raw = (performance.now() - fx.startMs) / SAFEHOUSE_SPENT_TILE_ANIM_MS;
+        u = clamp(raw, 0, 1);
+        u = u * u * (3 - 2 * u);
+      }
+      const overlayA = 0.72 * u;
+      const rimA = 0.62 * Math.max(0, u - 0.12) * Math.min(1, (u - 0.12) / 0.55);
+      ctx.save();
+      ctx.beginPath();
+      for (let i = 0; i < 6; i++) {
+        const a = -Math.PI / 2 + (Math.PI / 3) * i;
+        const x = c.x + Math.cos(a) * HEX_SIZE;
+        const y = c.y + Math.sin(a) * HEX_SIZE;
+        if (i === 0) ctx.moveTo(x, y);
+        else ctx.lineTo(x, y);
+      }
+      ctx.closePath();
+      if (fx && fx.key === kk && u < 0.28) {
+        const w = Math.sin((u / 0.28) * Math.PI);
+        ctx.fillStyle = `rgba(254, 243, 199, ${0.1 * w})`;
+        ctx.fill();
+      }
+      ctx.fillStyle = `rgba(15, 23, 42, ${overlayA})`;
+      ctx.fill();
+      if (rimA > 0.02) {
+        ctx.strokeStyle = `rgba(51, 65, 85, ${rimA})`;
+        ctx.lineWidth = 2.4 + 1.8 * Math.min(1, (u - 0.2) / 0.65);
+        ctx.stroke();
+      }
+      ctx.restore();
+    }
+    if (prim && prim.q === q && prim.r === r) {
+      const rw = getSafehouseEmbeddedRouletteWorld(prim);
+      const fw = getSafehouseEmbeddedForgeWorld(prim);
+      const vr = safehouseEmbeddedMiniVertexRadius();
+      drawSafehouseEmbeddedFacilities(ctx, {
+        rouletteX: rw.x,
+        rouletteY: rw.y,
+        forgeX: fw.x,
+        forgeY: fw.y,
+        vertexRadius: vr,
+        elapsed: state.elapsed,
+        embeddedRouletteComplete: state.safehouseEmbeddedRouletteComplete,
+        embeddedForgeComplete: state.safehouseEmbeddedForgeComplete,
+      });
+    }
+  }
+}
+
+function tickSafehouseEmbedRevealFromWallClock() {
+  if (state.safehouseEmbedRevealAtMs > 0 && performance.now() >= state.safehouseEmbedRevealAtMs) {
+    state.safehouseInnerFacilitiesUnlocked = true;
+    state.safehouseEmbedRevealAtMs = 0;
+  }
+}
+
+function tickSafehouseSpentTileAnimDone() {
+  const fx = state.safehouseSpentTileAnim;
+  if (!fx) return;
+  if (performance.now() - fx.startMs >= SAFEHOUSE_SPENT_TILE_ANIM_MS) {
+    state.safehouseSpentTileAnim = null;
+  }
+}
+
+function updateSafehouseSpendAfterLevelLeave() {
+  if (!state.safehouseAwaitingLeaveAfterLevelUp || !state.safehouseLevelUpTileKey) return;
+  const pk = state.safehouseLevelUpTileKey;
+  const parts = pk.split(",");
+  if (parts.length !== 2) {
+    state.safehouseAwaitingLeaveAfterLevelUp = false;
+    state.safehouseLevelUpTileKey = "";
+    return;
+  }
+  const pq = Number(parts[0]);
+  const pr = Number(parts[1]);
+  if (!Number.isFinite(pq) || !Number.isFinite(pr)) {
+    state.safehouseAwaitingLeaveAfterLevelUp = false;
+    state.safehouseLevelUpTileKey = "";
+    return;
+  }
+  const ph = worldToHex(player.x, player.y);
+  if (ph.q === pq && ph.r === pr) return;
+  markProceduralSafehouseHexSpent(pq, pr);
+}
+
+function clampPlayerOutOfSpentSafehouseCore() {
+  const ph = worldToHex(player.x, player.y);
+  if (!isSafehouseHexSpentTile(ph.q, ph.r)) return;
+  const cc = hexToWorld(ph.q, ph.r);
+  const dx = player.x - cc.x;
+  const dy = player.y - cc.y;
+  const d = Math.hypot(dx, dy) || 1;
+  const minR = SAFEHOUSE_INNER_HIT_R + player.r * 0.25;
+  if (d < minR && d > 1e-4) {
+    player.x = cc.x + (dx / d) * minR;
+    player.y = cc.y + (dy / d) * minR;
+  }
+}
+
+function runClockEffectiveSec() {
+  return Math.max(0, state.elapsed - state.safehouseClockFreeze);
+}
+
+function relDifficultySurvivalSec() {
+  return Math.max(0, runClockEffectiveSec() - state.spawnDifficultyAnchorSurvival);
+}
+
+function accumulateSafehouseClockFreeze(dt) {
+  if (!state.running || dt <= 0) return;
+  const ph = worldToHex(player.x, player.y);
+  if (isSafehouseHexTile(ph.q, ph.r)) state.safehouseClockFreeze += dt;
+}
+
+/** World tier shown in HUD: 1 at run start, +1 per accepted sanctuary level-up. */
+function displayWorldLevel() {
+  return state.runLevel + 1;
+}
+
+/** Per accepted level-up beyond baseline: ×1.15 enemy base speed per tier (tier 1 = ×1). */
+function runLevelEnemySpeedMult() {
+  if (state.runLevel <= 0) return 1;
+  return Math.pow(1.15, state.runLevel);
+}
+
+/** Per tier: +10% steering / direction responsiveness (caps so blend stays stable). */
+function runLevelEnemyAccelMult() {
+  if (state.runLevel <= 0) return 1;
+  return Math.pow(1.1, state.runLevel);
+}
+
+function getPrimarySafehouseAxial() {
+  if (escapeLocalDevHost && state.testWestKind === "safehouse") {
+    const k = hexKey(state.testWestQ, state.testWestR);
+    if (!state.proceduralSafehouseSpentKeys.has(k)) return { q: state.testWestQ, r: state.testWestR };
+  }
+  for (const k of state.proceduralSafehouseKeys) {
+    const [q, r] = k.split(",").map(Number);
+    return { q, r };
+  }
+  return null;
+}
+
+function barrierDiskBlocksWorldPoint(x, y) {
+  return isWorldPointOnSafehouseBarrierDisk(x, y);
 }
 
 function surgeTravelDurationForWave(wave) {
@@ -700,7 +1157,7 @@ function isWorldPointOnSurgeLockBarrierTile(px, py) {
 }
 
 function updateSurgeHex(_dt) {
-  if (!state.running || state.pausedForRoulette) return;
+  if (!state.running || state.pausedForRoulette || state.pausedForSafehousePrompt || state.pausedForForge) return;
 
   if (
     !state.pausedForCard &&
@@ -846,34 +1303,42 @@ function drawSurgeHexWorld(ctx) {
 }
 
 function tryProceduralRareSpecialHex(q, r) {
-  if (state.elapsed < PROCEDURAL_SPECIAL_HEX_MIN_ELAPSED_SEC) return;
-  if (state.proceduralSpecialCooldownTiles > 0) {
-    state.proceduralSpecialCooldownTiles -= 1;
-    return;
-  }
+  const w = getProceduralSpecialSpawnWeight();
+  if (w <= 0) return;
   const k = hexKey(q, r);
   if (
     state.proceduralArenaKeys.has(k) ||
     state.proceduralRouletteKeys.has(k) ||
     state.proceduralSurgeKeys.has(k) ||
+    state.proceduralSafehouseKeys.has(k) ||
+    state.proceduralSafehouseSpentKeys.has(k) ||
     (escapeLocalDevHost && state.testWestQ === q && state.testWestR === r)
   ) {
     return;
   }
   const activeProceduralSpecials =
-    state.proceduralArenaKeys.size + state.proceduralRouletteKeys.size + state.proceduralSurgeKeys.size;
+    state.proceduralArenaKeys.size +
+    state.proceduralRouletteKeys.size +
+    state.proceduralSurgeKeys.size +
+    state.proceduralSafehouseKeys.size;
   if (activeProceduralSpecials >= 1) return;
-  if (Math.random() >= SPECIAL_HEX_POOL_WEIGHT) return;
+  if (Math.random() >= w) return;
   state.proceduralArenaSpentKeys.delete(k);
   state.proceduralRouletteSpentKeys.delete(k);
   state.proceduralSurgeSpentKeys.delete(k);
-  const roll = Math.random();
-  const kind = roll < 1 / 3 ? "arena" : roll < 2 / 3 ? "roulette" : "surge";
+  state.proceduralSafehouseSpentKeys.delete(k);
+  const kindRoll = Math.random();
+  const kind =
+    kindRoll < 0.25 ? "arena" : kindRoll < 0.5 ? "roulette" : kindRoll < 0.75 ? "surge" : "safehouse";
   if (kind === "arena") state.proceduralArenaKeys.add(k);
   else if (kind === "roulette") state.proceduralRouletteKeys.add(k);
-  else state.proceduralSurgeKeys.add(k);
-  state.proceduralSpecialCooldownTiles = PROCEDURAL_SPECIAL_COOLDOWN_TILES;
-  runLog.event(LogCodes.EVT_PROCEDURAL_SPECIAL_HEX, "Procedural special tile placed", { q, r, kind });
+  else if (kind === "surge") state.proceduralSurgeKeys.add(k);
+  else {
+    state.proceduralSafehouseKeys.add(k);
+    state.safehouseLevelPromptShownKeys.delete(k);
+    resetSafehouseEmbeddedProgress();
+  }
+  runLog.event(LogCodes.EVT_PROCEDURAL_SPECIAL_HEX, "Procedural special tile placed", { q, r, kind, spawnWeight: w });
 }
 
 /** World point lies on the active roulette hex (axial cell + circumradius guard). */
@@ -886,11 +1351,17 @@ function isWorldPointOnRouletteHexTile(x, y) {
 
 function isWorldPointOnSpecialLootForbiddenHex(x, y) {
   const h = worldToHex(x, y);
-  return isArenaNexusTile(h.q, h.r) || isRouletteHexTile(h.q, h.r) || isSurgeHexTile(h.q, h.r);
+  return (
+    isArenaNexusTile(h.q, h.r) ||
+    isRouletteHexTile(h.q, h.r) ||
+    isSurgeHexTile(h.q, h.r) ||
+    isSafehouseHexTile(h.q, h.r)
+  );
 }
 
 /** Ground/air spawners must not sit on special-hex footprint (roulette uses circumhex guard). */
 function isWorldPointOnSpecialSpawnerForbiddenHex(x, y) {
+  if (isWorldPointOnSafehouseBarrierDisk(x, y)) return true;
   if (isWorldPointOnRouletteHexTile(x, y)) return true;
   const h = worldToHex(x, y);
   if (!isArenaNexusTile(h.q, h.r) && !isSurgeHexTile(h.q, h.r)) return false;
@@ -1015,7 +1486,7 @@ function finishArenaNexusSiege() {
 }
 
 function updateArenaNexus(_dt) {
-  if (!state.running || state.pausedForRoulette) return;
+  if (!state.running || state.pausedForRoulette || state.pausedForSafehousePrompt || state.pausedForForge) return;
   if (
     state.arenaPhase === 2 &&
     state.arenaCardRewardAt > 0 &&
@@ -1120,20 +1591,25 @@ function triggerRouletteHexOuterCrossing() {
   triggerUltScreenShake(14, 0.22);
   damagePlayer(2, { rouletteHexOuterPenalty: true });
   ejectHuntersFromRouletteHexLock();
+  state.rouletteOuterDamageAppliedKeys.add(hexKey(state.rouletteLockQ, state.rouletteLockR));
 }
 
 function drawRouletteHexWorld(ctx) {
   const cells = collectRouletteHexAxials();
   if (!cells.length) return;
-  let outerColor = "rgba(59, 130, 250, 0.92)";
-  if (state.roulettePhase === 1) outerColor = "rgba(239, 68, 68, 0.95)";
-  else if (state.roulettePhase === 2) outerColor = "rgba(34, 197, 94, 0.92)";
   for (const { q, r } of cells) {
     const c = hexToWorld(q, r);
     const cx = c.x;
     const cy = c.y;
-    let cellOuter = outerColor;
-    if (state.proceduralRouletteSpentKeys.has(hexKey(q, r))) cellOuter = "rgba(34, 197, 94, 0.92)";
+    const k = hexKey(q, r);
+    let cellOuter = "rgba(59, 130, 246, 0.92)";
+    if (state.proceduralRouletteSpentKeys.has(k)) {
+      cellOuter = "rgba(34, 197, 94, 0.92)";
+    } else if (isRouletteHexInteractive(q, r)) {
+      cellOuter = state.rouletteOuterDamageAppliedKeys.has(k)
+        ? "rgba(59, 130, 246, 0.92)"
+        : "rgba(249, 115, 22, 0.92)";
+    }
     strokePointyHexOutline(ctx, cx, cy, HEX_SIZE, cellOuter, 3.2, 18);
     fillPointyHexRainbowGlow(ctx, cx, cy, ROULETTE_INNER_HEX_DRAW_R, state.elapsed);
   }
@@ -1229,7 +1705,12 @@ function finishRouletteForgeSuccess(chosen) {
     chosenSuit: chosen?.suit,
     chosenRank: chosen?.rank,
   });
-  markProceduralRouletteHexSpent(state.rouletteLockQ, state.rouletteLockR);
+  const lk = hexKey(state.rouletteLockQ, state.rouletteLockR);
+  if (state.proceduralRouletteKeys.has(lk)) {
+    markProceduralRouletteHexSpent(state.rouletteLockQ, state.rouletteLockR);
+  } else {
+    state.safehouseEmbeddedRouletteComplete = true;
+  }
   closeRouletteForgeUi();
   recalcCardPassives();
 }
@@ -1446,28 +1927,424 @@ function openRouletteForgeModal() {
   });
 }
 
-function updateRouletteUi(_dt) {
-  if (state.rouletteStep !== "spin" || !state.rouletteOptionA || !state.rouletteOptionB) return;
-  const elapsed = state.elapsed;
-  if (elapsed >= state.rouletteSpinRevealAt) {
-    state.rouletteStep = "pick";
-    renderRouletteSpinSettled();
-    if (rouletteModalSub) rouletteModalSub.textContent = "Click a card to keep (the other is lost).";
-    renderRoulettePickWinnerButtons();
-    wireRouletteCardPickListeners();
+function closeSafehouseLevelModal() {
+  state.pausedForSafehousePrompt = false;
+  if (safehouseLevelModal) safehouseLevelModal.hidden = true;
+  state.keys.clear();
+}
+
+function openSafehouseLevelModal() {
+  const prim = getPrimarySafehouseAxial();
+  if (!prim || !isSafehouseHexActiveTile(prim.q, prim.r)) return;
+  const k = hexKey(prim.q, prim.r);
+  if (state.safehouseLevelPromptShownKeys.has(k)) return;
+  if (!safehouseLevelModal || state.pausedForSafehousePrompt) return;
+  state.safehouseLevelPromptShownKeys.add(k);
+  state.pausedForSafehousePrompt = true;
+  state.keys.clear();
+  safehouseLevelModal.hidden = false;
+}
+
+function applySafehouseLevelUp() {
+  state.runLevel += 1;
+  state.spawnDifficultyAnchorSurvival = runClockEffectiveSec();
+  state.spawnScheduled = [];
+  state.spawnInterval = getSpawnIntervalFromRunTime();
+  state.nextSpawnAt = state.elapsed + state.spawnInterval;
+  runLog.event(LogCodes.EVT_SAFEHOUSE_LEVEL_UP, "Safehouse level accepted", {
+    runLevel: state.runLevel,
+    innerFacilities: true,
+  });
+}
+
+function updateSafehouseHex(_dt) {
+  if (!state.running || state.pausedForCard || state.pausedForRoulette || state.pausedForForge || state.pausedForSafehousePrompt)
+    return;
+  const prim = getPrimarySafehouseAxial();
+  if (!prim || !isSafehouseHexActiveTile(prim.q, prim.r)) return;
+  if (!safehouseLevelModal) return;
+  const ph = worldToHex(player.x, player.y);
+  const c = hexToWorld(prim.q, prim.r);
+  const dist = Math.hypot(player.x - c.x, player.y - c.y);
+  const inInner = ph.q === prim.q && ph.r === prim.r && dist <= SAFEHOUSE_INNER_HIT_R;
+  if (!inInner) {
+    state.safehouseLevelInnerLatch = false;
     return;
   }
-  if (elapsed >= state.rouletteSpinShuffleUntil) {
-    if (rouletteModalSub) rouletteModalSub.textContent = "Revealing…";
-    syncRouletteSpinWhiteoutVisual();
+  if (!state.safehouseLevelInnerLatch) {
+    state.safehouseLevelInnerLatch = true;
+    openSafehouseLevelModal();
+  }
+}
+
+function closeForgeModalUi() {
+  runLog.event(LogCodes.EVT_FORGE_MODAL_CLOSE, "Forge modal closed");
+  state.pausedForForge = false;
+  state.forgeRefA = null;
+  state.forgeRefB = null;
+  state.forgePendingSuit = null;
+  if (forgeModal) forgeModal.hidden = true;
+  if (forgeModalInventory) forgeModalInventory.innerHTML = "";
+  if (forgeSlotLeft) {
+    forgeSlotLeft.innerHTML = "";
+    forgeSlotLeft.textContent = "";
+    forgeSlotLeft.style.fontSize = "";
+    forgeSlotLeft.style.color = "";
+  }
+  if (forgeSlotRight) {
+    forgeSlotRight.innerHTML = "";
+    forgeSlotRight.textContent = "";
+    forgeSlotRight.style.fontSize = "";
+    forgeSlotRight.style.color = "";
+  }
+  if (forgePreviewValue) forgePreviewValue.textContent = "—";
+  if (forgeModalHint) forgeModalHint.textContent = "";
+  if (forgeModalActions) forgeModalActions.innerHTML = "";
+  state.keys.clear();
+}
+
+function forgeRefKey(ref) {
+  if (!ref) return "";
+  return ref.kind === "deck" ? `d:${ref.rank}` : `b:${ref.idx}`;
+}
+
+function parseForgeRefFromDataset(json) {
+  try {
+    const o = JSON.parse(json);
+    if (o?.kind === "deck" && Number.isInteger(o.rank)) return { kind: "deck", rank: o.rank };
+    if (o?.kind === "bp" && Number.isInteger(o.idx)) return { kind: "bp", idx: o.idx };
+  } catch {
+    /* ignore */
+  }
+  return null;
+}
+
+function cardAtForgeRef(ref) {
+  if (!ref) return null;
+  if (ref.kind === "deck") return inventory.deckByRank[ref.rank] || null;
+  return inventory.backpackSlots[ref.idx] || null;
+}
+
+function forgeForgedRankFromCards(a, b) {
+  if (!a || !b || a.suit === "joker" || b.suit === "joker") return null;
+  const ra = a.rank;
+  const rb = b.rank;
+  if (!Number.isInteger(ra) || !Number.isInteger(rb)) return null;
+  return clamp(ra + rb, 1, 13);
+}
+
+function forgeOutcomeSuit(a, b) {
+  const suits = [];
+  if (a?.suit && a.suit !== "joker") suits.push(a.suit);
+  if (b?.suit && b.suit !== "joker") suits.push(b.suit);
+  if (!suits.length) return "spades";
+  return suits[Math.floor(Math.random() * suits.length)];
+}
+
+function clearForgeRefSlot(ref) {
+  if (!ref) return;
+  if (ref.kind === "deck") inventory.deckByRank[ref.rank] = null;
+  else inventory.backpackSlots[ref.idx] = null;
+}
+
+function commitForgeMerge() {
+  const ca = cardAtForgeRef(state.forgeRefA);
+  const cb = cardAtForgeRef(state.forgeRefB);
+  const rank = forgeForgedRankFromCards(ca, cb);
+  if (!ca || !cb || rank == null) {
+    closeForgeModalUi();
     return;
   }
-  syncRouletteSpinShuffleVisual();
+  const suit = state.forgePendingSuit || forgeOutcomeSuit(ca, cb);
+  const placed = {
+    id: `forge-${Date.now()}-${Math.floor(Math.random() * 1e6)}`,
+    suit,
+    rank,
+    effect: makeCardEffect(suit, rank),
+  };
+  /** @type {{ kind: "deck"; rank: number } | { kind: "bp"; idx: number } | null} */
+  let dest =
+    !inventory.deckByRank[rank]
+      ? { kind: "deck", rank }
+      : (() => {
+          const i = inventory.backpackSlots.findIndex((s) => !s);
+          return i >= 0 ? { kind: "bp", idx: i } : null;
+        })();
+  if (!dest) {
+    if (forgeModalHint) {
+      forgeModalHint.textContent =
+        "That forged rank’s deck slot is occupied and your backpack is full. Make room, then try again.";
+    }
+    return;
+  }
+  clearForgeRefSlot(state.forgeRefA);
+  clearForgeRefSlot(state.forgeRefB);
+  if (getPrimarySafehouseAxial() && state.safehouseInnerFacilitiesUnlocked) {
+    state.safehouseEmbeddedForgeComplete = true;
+  }
+  runLog.event(LogCodes.EVT_FORGE_SUCCESS, "Forge merge completed", { rank, suit });
+  recalcCardPassives();
+  renderCardSlots();
+  updateSetBonusStatus();
+  closeForgeModalUi();
+  openCardPickupModal(placed);
+}
+
+function assignForgeToSlot(slot, ref) {
+  if (!ref || (slot !== "left" && slot !== "right")) return;
+  const k = forgeRefKey(ref);
+  if (slot === "left") {
+    if (forgeRefKey(state.forgeRefB) === k) state.forgeRefB = null;
+    state.forgeRefA = ref;
+  } else {
+    if (forgeRefKey(state.forgeRefA) === k) state.forgeRefA = null;
+    state.forgeRefB = ref;
+  }
+  syncForgeMergeUi();
+}
+
+function renderForgeSlotContents() {
+  for (const slot of /** @type {const} */ (["left", "right"])) {
+    const el = slot === "left" ? forgeSlotLeft : forgeSlotRight;
+    if (!el) continue;
+    const ref = slot === "left" ? state.forgeRefA : state.forgeRefB;
+    const card = cardAtForgeRef(ref);
+    el.innerHTML = "";
+    if (!card) {
+      el.textContent = "Drop";
+      el.style.fontSize = "12px";
+      el.style.color = "rgba(148,163,184,0.75)";
+      continue;
+    }
+    el.textContent = "";
+    el.style.fontSize = "";
+    el.style.color = "";
+    const wrap = document.createElement("div");
+    wrap.className = "forge-slot-card";
+    wrap.textContent = formatCardName(card);
+    el.appendChild(wrap);
+  }
+}
+
+function renderForgeInventoryChips() {
+  if (!forgeModalInventory) return;
+  forgeModalInventory.innerHTML = "";
+  const usedA = forgeRefKey(state.forgeRefA);
+  const usedB = forgeRefKey(state.forgeRefB);
+  const mk = (label, ref) => {
+    const k = forgeRefKey(ref);
+    if (k && (k === usedA || k === usedB)) return;
+    const d = document.createElement("div");
+    d.className = "forge-inv-chip";
+    d.draggable = true;
+    d.dataset.forgeRef = JSON.stringify(ref);
+    d.textContent = label;
+    forgeModalInventory.appendChild(d);
+  };
+  for (let r = 1; r <= 13; r++) {
+    const c = inventory.deckByRank[r];
+    if (!c || c.suit === "joker") continue;
+    mk(`Deck ${r} — ${formatCardName(c)}`, { kind: "deck", rank: r });
+  }
+  for (let i = 0; i < inventory.backpackSlots.length; i++) {
+    const c = inventory.backpackSlots[i];
+    if (!c || c.suit === "joker") continue;
+    mk(`BP ${i + 1} — ${formatCardName(c)}`, { kind: "bp", idx: i });
+  }
+}
+
+function forgeRefreshActionButtons() {
+  if (!forgeModalActions) return;
+  forgeModalActions.innerHTML = "";
+  const ca = cardAtForgeRef(state.forgeRefA);
+  const cb = cardAtForgeRef(state.forgeRefB);
+  const rank = forgeForgedRankFromCards(ca, cb);
+  const ready = rank != null;
+
+  const confirm = document.createElement("button");
+  confirm.type = "button";
+  confirm.className = "leave-button";
+  confirm.textContent = "Confirm forge";
+  confirm.disabled = !ready;
+  confirm.addEventListener("click", () => {
+    const c1 = cardAtForgeRef(state.forgeRefA);
+    const c2 = cardAtForgeRef(state.forgeRefB);
+    if (forgeForgedRankFromCards(c1, c2) == null) return;
+    if (!state.forgePendingSuit) state.forgePendingSuit = forgeOutcomeSuit(c1, c2);
+    commitForgeMerge();
+  });
+  forgeModalActions.appendChild(confirm);
+
+  const clear = document.createElement("button");
+  clear.type = "button";
+  clear.className = "leave-button";
+  clear.textContent = "Clear";
+  clear.addEventListener("click", () => {
+    state.forgeRefA = null;
+    state.forgeRefB = null;
+    state.forgePendingSuit = null;
+    syncForgeMergeUi();
+  });
+  forgeModalActions.appendChild(clear);
+
+  const cancel = document.createElement("button");
+  cancel.type = "button";
+  cancel.className = "leave-button";
+  cancel.textContent = "Cancel";
+  cancel.addEventListener("click", () => closeForgeModalUi());
+  forgeModalActions.appendChild(cancel);
+}
+
+function syncForgeMergeUi() {
+  const ca = cardAtForgeRef(state.forgeRefA);
+  const cb = cardAtForgeRef(state.forgeRefB);
+  const rank = forgeForgedRankFromCards(ca, cb);
+
+  if (forgePreviewValue) forgePreviewValue.textContent = rank == null ? "—" : String(rank);
+
+  if (ca && cb && rank != null) {
+    if (!state.forgePendingSuit) state.forgePendingSuit = forgeOutcomeSuit(ca, cb);
+    if (forgeModalHint) {
+      forgeModalHint.textContent = `Creates rank ${rank}. Suit: ${state.forgePendingSuit} (random donor). Passive rerolls on confirm.`;
+    }
+  } else {
+    state.forgePendingSuit = null;
+    if (forgeModalHint) {
+      forgeModalHint.textContent = "Drag two cards from the inventory into the left and right slots, then confirm.";
+    }
+  }
+
+  renderForgeSlotContents();
+  renderForgeInventoryChips();
+  forgeRefreshActionButtons();
+}
+
+function wireForgeModalDragDropOnce() {
+  if (!forgeModal || forgeModal.dataset.forgeDragWired === "1") return;
+  if (!forgeModalInventory || !forgeSlotLeft || !forgeSlotRight) return;
+  forgeModal.dataset.forgeDragWired = "1";
+
+  forgeModalInventory.addEventListener("dragstart", (e) => {
+    const t = e.target;
+    const chip = t instanceof Element ? t.closest(".forge-inv-chip") : null;
+    if (!chip || !chip.dataset.forgeRef) return;
+    e.dataTransfer.setData("application/json", chip.dataset.forgeRef);
+    e.dataTransfer.effectAllowed = "copy";
+  });
+
+  for (const slotEl of [forgeSlotLeft, forgeSlotRight]) {
+    slotEl.addEventListener("dragenter", (e) => {
+      e.preventDefault();
+      slotEl.classList.add("forge-drop-slot--hover");
+    });
+    slotEl.addEventListener("dragleave", () => slotEl.classList.remove("forge-drop-slot--hover"));
+    slotEl.addEventListener("dragover", (e) => {
+      e.preventDefault();
+      slotEl.classList.add("forge-drop-slot--hover");
+    });
+    slotEl.addEventListener("drop", (e) => {
+      e.preventDefault();
+      slotEl.classList.remove("forge-drop-slot--hover");
+      const raw = e.dataTransfer.getData("application/json");
+      const ref = parseForgeRefFromDataset(raw);
+      if (!ref) return;
+      const slot = slotEl.dataset.slot;
+      if (slot === "left" || slot === "right") assignForgeToSlot(slot, ref);
+    });
+  }
+}
+
+function openForgeModal() {
+  wireForgeModalDragDropOnce();
+  if (
+    !forgeModal ||
+    !forgeModalActions ||
+    !forgeModalInventory ||
+    !forgeSlotLeft ||
+    !forgeSlotRight ||
+    !forgePreviewValue ||
+    state.pausedForForge
+  )
+    return;
+  runLog.event(LogCodes.EVT_FORGE_MODAL_OPEN, "Forge modal opened");
+  state.pausedForForge = true;
+  state.forgeRefA = null;
+  state.forgeRefB = null;
+  state.forgePendingSuit = null;
+  state.keys.clear();
+  forgeModal.hidden = false;
+  if (forgeModalTitle) forgeModalTitle.textContent = "Forge";
+  if (forgeModalSub) {
+    forgeModalSub.textContent =
+      "Inventory above. Drag two cards into the side slots. The center is the forged rank (sum of ranks, capped at 13).";
+  }
+  syncForgeMergeUi();
+}
+
+function updateForgeHex(_dt) {
+  if (!state.running || state.pausedForCard || state.pausedForRoulette || state.pausedForSafehousePrompt || state.pausedForForge)
+    return;
+  if (!state.safehouseInnerFacilitiesUnlocked || state.safehouseEmbeddedForgeComplete) return;
+  const prim = getPrimarySafehouseAxial();
+  if (!prim) return;
+  const ph = worldToHex(player.x, player.y);
+  if (ph.q !== prim.q || ph.r !== prim.r) {
+    state.forgeInnerExitLatch = false;
+    return;
+  }
+  const fw = getSafehouseEmbeddedForgeWorld(prim);
+  const dist = Math.hypot(player.x - fw.x, player.y - fw.y);
+  const inInner = dist <= safehouseEmbedSiteHitR();
+  if (inInner && !state.forgeInnerExitLatch) {
+    state.forgeInnerExitLatch = true;
+    openForgeModal();
+  }
+  if (!inInner) state.forgeInnerExitLatch = false;
+}
+
+function updateSafehouseEmbeddedRouletteHex(_dt, prim) {
+  if (!state.running || state.pausedForCard || state.pausedForRoulette || state.pausedForSafehousePrompt || state.pausedForForge)
+    return;
+  const ph = worldToHex(player.x, player.y);
+  if (ph.q !== prim.q || ph.r !== prim.r) {
+    state.rouletteInnerExitLatch = false;
+    state.rouletteWasInHex = false;
+    if (!state.safehouseEmbeddedRouletteComplete) {
+      state.roulettePhase = 0;
+      state.rouletteForgeComplete = false;
+    }
+    return;
+  }
+
+  const rw = getSafehouseEmbeddedRouletteWorld(prim);
+  const d = Math.hypot(player.x - rw.x, player.y - rw.y);
+  const inRainbow = d <= safehouseEmbedSiteHitR();
+  state.rouletteWasInHex = true;
+
+  if (
+    inRainbow &&
+    !state.rouletteForgeComplete &&
+    !state.safehouseEmbeddedRouletteComplete &&
+    !state.rouletteInnerExitLatch
+  ) {
+    state.rouletteInnerExitLatch = true;
+    state.rouletteLockQ = prim.q;
+    state.rouletteLockR = prim.r;
+    state.roulettePhase = 1;
+    openRouletteForgeModal();
+  }
+  if (!inRainbow) state.rouletteInnerExitLatch = false;
 }
 
 function updateRouletteHex(_dt) {
-  if (!state.running || state.pausedForCard || state.pausedForRoulette) return;
+  if (!state.running || state.pausedForCard || state.pausedForRoulette || state.pausedForSafehousePrompt || state.pausedForForge)
+    return;
   const ph = worldToHex(player.x, player.y);
+  const prim = getPrimarySafehouseAxial();
+  if (state.safehouseInnerFacilitiesUnlocked && prim && ph.q === prim.q && ph.r === prim.r) {
+    updateSafehouseEmbeddedRouletteHex(_dt, prim);
+    return;
+  }
   const inHex = isRouletteHexTile(ph.q, ph.r);
   if (!inHex) {
     state.rouletteWasInHex = false;
@@ -1487,7 +2364,13 @@ function updateRouletteHex(_dt) {
   ) {
     state.rouletteLockQ = ph.q;
     state.rouletteLockR = ph.r;
-    triggerRouletteHexOuterCrossing();
+    const rk = hexKey(ph.q, ph.r);
+    if (state.rouletteOuterDamageAppliedKeys.has(rk)) {
+      state.roulettePhase = 1;
+      state.rouletteScreenFlashUntil = 0;
+    } else {
+      triggerRouletteHexOuterCrossing();
+    }
   }
   state.rouletteWasInHex = true;
   if (
@@ -1502,6 +2385,25 @@ function updateRouletteHex(_dt) {
     openRouletteForgeModal();
   }
   if (!inInner) state.rouletteInnerExitLatch = false;
+}
+
+function updateRouletteUi(_dt) {
+  if (state.rouletteStep !== "spin" || !state.rouletteOptionA || !state.rouletteOptionB) return;
+  const elapsed = state.elapsed;
+  if (elapsed >= state.rouletteSpinRevealAt) {
+    state.rouletteStep = "pick";
+    renderRouletteSpinSettled();
+    if (rouletteModalSub) rouletteModalSub.textContent = "Click a card to keep (the other is lost).";
+    renderRoulettePickWinnerButtons();
+    wireRouletteCardPickListeners();
+    return;
+  }
+  if (elapsed >= state.rouletteSpinShuffleUntil) {
+    if (rouletteModalSub) rouletteModalSub.textContent = "Revealing…";
+    syncRouletteSpinWhiteoutVisual();
+    return;
+  }
+  syncRouletteSpinShuffleVisual();
 }
 
 const player = {
@@ -1581,18 +2483,26 @@ const state = {
   rogueNextFoodAt: 0,
   rogueNextHungryPopupAt: 0,
   rogueLastKnownPlayerPos: { x: 96, y: 340 },
-  /** Procedural arena hexes (`hexKey` → Set); at most one active special across arena/roulette/surge; 1/20 + 15-tile cooldown. */
+  /** Procedural arena hexes (`hexKey` → Set); at most one active special (arena / roulette / surge / safehouse). */
   proceduralArenaKeys: new Set(),
   proceduralRouletteKeys: new Set(),
   proceduralSurgeKeys: new Set(),
   proceduralArenaSpentKeys: new Set(),
   proceduralRouletteSpentKeys: new Set(),
   proceduralSurgeSpentKeys: new Set(),
+  /** Procedural safehouse sanctuary hexes (active instance). */
+  proceduralSafehouseKeys: new Set(),
+  /** Spent sanctuary tiles (dark, inner locked) until chunk evicts from the active window. */
+  proceduralSafehouseSpentKeys: new Set(),
   /** Axial cell where the current roulette outer-lock session is anchored (set on outer crossing). */
   rouletteLockQ: 0,
   rouletteLockR: 0,
-  /** Newly generated tiles to skip before the next 1/20 special roll (after a spawn, starts at 15). */
-  proceduralSpecialCooldownTiles: 0,
+  /** No procedural special rolls until `elapsed` reaches this (seconds). */
+  specialSpawnCooldownUntil: 0,
+  /** After unused despawn: hold spawn weight at END until the next used special. */
+  specialSpawnHoldMaxRate: false,
+  /** Start of 1/30 → 1/10 decay window (`elapsed` seconds). */
+  specialSpawnRateEpochStart: PROCEDURAL_SPECIAL_HEX_MIN_ELAPSED_SEC,
   /** 0 = idle (blue), 1 = siege (red), 2 = cleared (green). */
   arenaPhase: 0,
   arenaSiegeEndAt: 0,
@@ -1606,10 +2516,12 @@ const state = {
   /** Local-dev west neighbor for `#special-test-west-select` (additive with procedural specials). */
   testWestQ: 0,
   testWestR: 0,
-  /** @type {"none"|"arena"|"roulette"|"surge"} */
+  /** @type {"none"|"arena"|"roulette"|"surge"|"safehouse"} */
   testWestKind: "none",
   /** 0 idle blue, 1 locked after outer penalty, 2 cleared after forge. */
   roulettePhase: 0,
+  /** `hexKey` for each roulette cell whose outer-ring 2 damage has already fired this visit. */
+  rouletteOuterDamageAppliedKeys: new Set(),
   rouletteWasInHex: false,
   rouletteScreenFlashUntil: 0,
   rouletteForgeComplete: false,
@@ -1644,6 +2556,39 @@ const state = {
   surgeCardRewardAt: 0,
   surgeWasInSurgeHex: false,
   surgeScreenFlashUntil: 0,
+  /** Seconds of `elapsed` not counted toward survival HUD / danger ramp while on a safehouse tile. */
+  safehouseClockFreeze: 0,
+  /** `runClockEffectiveSec()` snapshot: difficulty ramp + midgame spawn escalation restart relative to this. */
+  spawnDifficultyAnchorSurvival: 0,
+  /** Sanctuary level-ups accepted this run; scaling uses this (display tier = +1). */
+  runLevel: 0,
+  /** `hexKey` → center level prompt already shown for this sanctuary **instance**. */
+  safehouseLevelPromptShownKeys: /** @type {Set<string>} */ (new Set()),
+  /** Wall-clock ms when embedded forge/roulette may appear (after level-up cinematic flash). */
+  safehouseEmbedRevealAtMs: 0,
+  /** After accepting level-up, when player steps off this `hexKey`, sanctuary becomes spent. */
+  safehouseAwaitingLeaveAfterLevelUp: false,
+  safehouseLevelUpTileKey: /** @type {string} */ (""),
+  /** @type {{ startMs: number; announceLevel: number } | null} */
+  runLevelUpCinematic: null,
+  /** Full-tile darken animation when sanctuary becomes spent (see `SAFEHOUSE_SPENT_TILE_ANIM_MS`). */
+  safehouseSpentTileAnim: /** @type {{ key: string; startMs: number } | null} */ (null),
+  safehouseLevelInnerLatch: false,
+  pausedForSafehousePrompt: false,
+  pausedForForge: false,
+  /** @type {{ kind: "deck"; rank: number } | { kind: "bp"; idx: number } | null} */
+  forgeRefA: null,
+  /** @type {{ kind: "deck"; rank: number } | { kind: "bp"; idx: number } | null} */
+  forgeRefB: null,
+  /** After first level-up: mini roulette + forge drawn inside the sanctuary tile. */
+  safehouseInnerFacilitiesUnlocked: false,
+  /** Embedded sanctuary roulette finished (mini stays cleared / green). */
+  safehouseEmbeddedRouletteComplete: false,
+  /** Embedded sanctuary forge used once (dimmed). */
+  safehouseEmbeddedForgeComplete: false,
+  forgeInnerExitLatch: false,
+  /** Picked when showing forge confirm so commit matches preview. */
+  forgePendingSuit: /** @type {string | null} */ (null),
 };
 
 let snapshotDirectoryHandle = null;
@@ -2812,6 +3757,12 @@ function lineIntersectsRect(x1, y1, x2, y2, rect) {
 function hasLineOfSight(from, target, opts = {}) {
   const ignoreObstacles = !!opts.ignoreObstacles;
   if (segmentIntersectsSmoke(from.x, from.y, target.x, target.y)) return false;
+  for (let s = 0; s <= 20; s++) {
+    const u = s / 20;
+    const sx = from.x + (target.x - from.x) * u;
+    const sy = from.y + (target.y - from.y) * u;
+    if (barrierDiskBlocksWorldPoint(sx, sy)) return false;
+  }
   if (!ignoreObstacles) {
     for (const obstacle of obstacles) {
       if (lineIntersectsRect(from.x, from.y, target.x, target.y, obstacle)) return false;
@@ -2836,6 +3787,9 @@ function getLaserEndpoint(x, y, dx, dy, maxLen = 900, opts = {}) {
     if (isWorldPointOnSurgeLockBarrierTile(px, py)) {
       return { x: lastX, y: lastY };
     }
+    if (barrierDiskBlocksWorldPoint(px, py)) {
+      return { x: lastX, y: lastY };
+    }
     if (!throughObstacles) {
       for (const obstacle of obstacles) {
         if (px >= obstacle.x && px <= obstacle.x + obstacle.w && py >= obstacle.y && py <= obstacle.y + obstacle.h) {
@@ -2852,11 +3806,13 @@ function getLaserEndpoint(x, y, dx, dy, maxLen = 900, opts = {}) {
 /** Sniper shelling: skip entirely if aim or the shot line would pass through the roulette hex. */
 function sniperArtillerySuppressedByRoulette(sniperX, sniperY, aimX, aimY) {
   if (isWorldPointOnSurgeLockBarrierTile(aimX, aimY)) return true;
+  if (barrierDiskBlocksWorldPoint(aimX, aimY)) return true;
   for (let s = 0; s <= 28; s++) {
     const u = s / 28;
     const sx = sniperX + (aimX - sniperX) * u;
     const sy = sniperY + (aimY - sniperY) * u;
     if (isWorldPointOnSurgeLockBarrierTile(sx, sy)) return true;
+    if (barrierDiskBlocksWorldPoint(sx, sy)) return true;
   }
   if (!hasAnyRouletteHexSite()) return false;
   if (isWorldPointOnRouletteHexTile(aimX, aimY)) return true;
@@ -3201,7 +4157,7 @@ function lootSpawnIntervalScale() {
 
 /** 0 at run start → 1 after DANGER_RAMP_SECONDS of survival (game time). */
 function getDangerRamp01() {
-  return clamp(state.elapsed / DANGER_RAMP_SECONDS, 0, 1);
+  return clamp(relDifficultySurvivalSec() / DANGER_RAMP_SECONDS, 0, 1);
 }
 
 function getSpawnIntervalFromRunTime() {
@@ -3245,6 +4201,26 @@ function resetGame() {
   state.manualPause = false;
   state.pausedForCard = false;
   state.pausedForRoulette = false;
+  state.pausedForSafehousePrompt = false;
+  state.pausedForForge = false;
+  state.safehouseLevelInnerLatch = false;
+  state.forgeInnerExitLatch = false;
+  state.forgeRefA = null;
+  state.forgeRefB = null;
+  state.forgePendingSuit = null;
+  state.safehouseInnerFacilitiesUnlocked = false;
+  state.safehouseEmbeddedRouletteComplete = false;
+  state.safehouseEmbeddedForgeComplete = false;
+  state.safehouseClockFreeze = 0;
+  state.spawnDifficultyAnchorSurvival = 0;
+  state.runLevel = 0;
+  state.proceduralSafehouseSpentKeys.clear();
+  state.safehouseLevelPromptShownKeys.clear();
+  state.safehouseEmbedRevealAtMs = 0;
+  state.safehouseAwaitingLeaveAfterLevelUp = false;
+  state.safehouseLevelUpTileKey = "";
+  state.runLevelUpCinematic = null;
+  state.safehouseSpentTileAnim = null;
   state.inventoryModalOpen = false;
   state.waitingForMovementResume = false;
   state.pendingCard = null;
@@ -3268,6 +4244,8 @@ function resetGame() {
   const spawnAxial = worldToHex(96, 340);
   initSpecialHexTiles(spawnAxial.q, spawnAxial.r);
   if (rouletteModal) rouletteModal.hidden = true;
+  if (forgeModal) forgeModal.hidden = true;
+  if (safehouseLevelModal) safehouseLevelModal.hidden = true;
   obstacles = [];
   activePlayerHex = { q: 0, r: 0 };
   activeHexes = [];
@@ -3803,8 +4781,9 @@ function spawnHunter(type, customX, customY, opts) {
 }
 
 function midgameEscalationTicks() {
-  if (state.elapsed < MIDGAME_ESCALATION_START_SEC) return 0;
-  return 1 + Math.floor((state.elapsed - MIDGAME_ESCALATION_START_SEC) / MIDGAME_ESCALATION_INTERVAL_SEC);
+  const t = relDifficultySurvivalSec();
+  if (t < MIDGAME_ESCALATION_START_SEC) return 0;
+  return 1 + Math.floor((t - MIDGAME_ESCALATION_START_SEC) / MIDGAME_ESCALATION_INTERVAL_SEC);
 }
 
 /** Multiplier on hunter base speeds and similar (chaser dash, ranged shots). */
@@ -3815,7 +4794,7 @@ function midgameEnemySpeedMult() {
 }
 
 function pickRegularHunterType() {
-  if (state.elapsed >= LATE_GAME_ELITE_SPAWN_SEC) {
+  if (relDifficultySurvivalSec() >= LATE_GAME_ELITE_SPAWN_SEC) {
     const er = Math.random();
     if (er < 0.055) return "airSpawner";
     if (er < 0.11) return "laserBlue";
@@ -3923,7 +4902,7 @@ function updateRogueNeeds(simDt, moving, touchedObstacle) {
     player.hp = 0;
     state.running = false;
     state.deathStartedAtMs = state.lastTime;
-    state.bestSurvival = Math.max(state.bestSurvival, state.elapsed);
+    state.bestSurvival = Math.max(state.bestSurvival, runClockEffectiveSec());
     return;
   }
 
@@ -4076,7 +5055,12 @@ function updateCardPickups() {
 function tryDash() {
   const ability = abilities.dash;
   if (!state.running) return;
-  if (state.pausedForRoulette) return;
+  if (
+    state.runLevelUpCinematic &&
+    performance.now() - state.runLevelUpCinematic.startMs < RUN_LEVEL_UP_CINEMATIC_MS
+  )
+    return;
+  if (state.pausedForRoulette || state.pausedForSafehousePrompt || state.pausedForForge) return;
   if (dashState.charges <= 0) return;
   let spadesCount = 0;
   forEachDeckCard((c) => {
@@ -4172,7 +5156,15 @@ function computeDashTarget() {
 
 function startRogueDashAim() {
   if (selectedCharacter.id !== "rogue") return;
-  if (!state.running || state.pausedForCard || state.pausedForRoulette || state.inventoryModalOpen) return;
+  if (
+    !state.running ||
+    state.pausedForCard ||
+    state.pausedForRoulette ||
+    state.pausedForSafehousePrompt ||
+    state.pausedForForge ||
+    state.inventoryModalOpen
+  )
+    return;
   if (dashState.charges <= 0) return;
   state.rogueDashAiming = true;
 }
@@ -4439,10 +5431,14 @@ function moveHunters(dt) {
     if (h.type === "airSpawner") {
       const target = pickTargetForHunter(h);
       const desired = vectorToTarget(h, target);
-      const airSpeed = AIR_SPAWNER_CHASE_SPEED * midgameEnemySpeedMult();
+      const sm = runLevelEnemySpeedMult();
+      const am = runLevelEnemyAccelMult();
+      const airSteer = Math.min(0.88, 0.78 * am);
+      const airInertia = 1 - airSteer;
+      const airSpeed = AIR_SPAWNER_CHASE_SPEED * sm * midgameEnemySpeedMult();
       // Crow-flies toward target; ignore terrain (no wall avoidance).
-      h.dir.x = h.dir.x * 0.22 + desired.x * 0.78;
-      h.dir.y = h.dir.y * 0.22 + desired.y * 0.78;
+      h.dir.x = h.dir.x * airInertia + desired.x * airSteer;
+      h.dir.y = h.dir.y * airInertia + desired.y * airSteer;
       const alen = Math.hypot(h.dir.x, h.dir.y) || 1;
       h.dir.x /= alen;
       h.dir.y /= alen;
@@ -4468,7 +5464,10 @@ function moveHunters(dt) {
             : h.type === "fast"
               ? 150
               : 110;
-    let speed = baseSpeed * speedFactor * midgameEnemySpeedMult();
+    const sm = runLevelEnemySpeedMult();
+    const steerW = Math.min(0.42, 0.26 * runLevelEnemyAccelMult());
+    const inertiaW = 1 - steerW;
+    let speed = baseSpeed * sm * speedFactor * midgameEnemySpeedMult();
     const rogueInSeekMode = selectedCharacter.id === "rogue" && state.elapsed > state.rogueAlertUntil;
     if (rogueInSeekMode) speed *= 0.58;
 
@@ -4594,7 +5593,7 @@ function moveHunters(dt) {
       }
 
       if (h.chaserDashPhase === "dashing") {
-        const dashSpeed = 405 * speedFactor * midgameEnemySpeedMult();
+        const dashSpeed = 405 * sm * speedFactor * midgameEnemySpeedMult();
         const stepLen = Math.min(dashSpeed * spDt, 24);
         const nx = h.x + h.chaserDashDir.x * stepLen;
         const ny = h.y + h.chaserDashDir.y * stepLen;
@@ -4629,12 +5628,16 @@ function moveHunters(dt) {
       desired = vectorToTarget(h, target);
     }
     const steer = avoidObstacles(h, desired);
-    h.dir.x = h.dir.x * 0.74 + steer.x * 0.26;
-    h.dir.y = h.dir.y * 0.74 + steer.y * 0.26;
+    h.dir.x = h.dir.x * inertiaW + steer.x * steerW;
+    h.dir.y = h.dir.y * inertiaW + steer.y * steerW;
     const dlen = Math.hypot(h.dir.x, h.dir.y) || 1;
     h.dir.x /= dlen;
     h.dir.y /= dlen;
     moveCircleWithCollisions(h, h.dir.x * speed, h.dir.y * speed, spDt);
+  }
+  for (const h of entities.hunters) {
+    if (h.type === "spawner") continue;
+    clampHunterOutsideSafehouseDisks(h);
   }
 }
 
@@ -4648,7 +5651,7 @@ function updateRangedAttackers(dt) {
     spawnAttackRing(h.x, h.y, h.r + 7, "#fb923c", 0.14);
 
     const to = vectorToTarget(h, target);
-    const speed = (h.shotSpeed || 360) * midgameEnemySpeedMult();
+    const speed = (h.shotSpeed || 360) * runLevelEnemySpeedMult() * midgameEnemySpeedMult();
     entities.projectiles.push({
       x: h.x,
       y: h.y,
@@ -4673,7 +5676,11 @@ function updateRangedAttackers(dt) {
       const u = s / 5;
       const sx = prevX + (p.x - prevX) * u;
       const sy = prevY + (p.y - prevY) * u;
-      if (isWorldPointOnRouletteHexTile(sx, sy) || isWorldPointOnSurgeLockBarrierTile(sx, sy)) {
+      if (
+        isWorldPointOnRouletteHexTile(sx, sy) ||
+        isWorldPointOnSurgeLockBarrierTile(sx, sy) ||
+        barrierDiskBlocksWorldPoint(sx, sy)
+      ) {
         hitSpecialBarrier = true;
         break;
       }
@@ -4822,7 +5829,7 @@ function damagePlayer(amount, opts = {}) {
     if (deathSnapshotsEnabled) state.snapshotPending = true;
     state.running = false;
     state.deathStartedAtMs = state.lastTime;
-    state.bestSurvival = Math.max(state.bestSurvival, state.elapsed);
+    state.bestSurvival = Math.max(state.bestSurvival, runClockEffectiveSec());
   }
 }
 
@@ -4883,7 +5890,11 @@ function updateSnipers(dt) {
       const u = s / 16;
       const sx = b.x + (b.tx - b.x) * u;
       const sy = b.y + (b.ty - b.y) * u;
-      if (isWorldPointOnRouletteHexTile(sx, sy) || isWorldPointOnSurgeLockBarrierTile(sx, sy)) {
+      if (
+        isWorldPointOnRouletteHexTile(sx, sy) ||
+        isWorldPointOnSurgeLockBarrierTile(sx, sy) ||
+        barrierDiskBlocksWorldPoint(sx, sy)
+      ) {
         hitSpecialBarrier = true;
         break;
       }
@@ -5082,14 +6093,33 @@ function updateLaserHazards() {
 function update(dt) {
   if (!gameStarted) return;
   if (!state.running) return;
-  if (state.manualPause) return;
+  tickSafehouseEmbedRevealFromWallClock();
+  tickSafehouseSpentTileAnimDone();
   if (state.pausedForCard) return;
   const simDt = dt;
+
+  if (state.runLevelUpCinematic) {
+    const age = performance.now() - state.runLevelUpCinematic.startMs;
+    if (age >= RUN_LEVEL_UP_CINEMATIC_MS) {
+      state.runLevelUpCinematic = null;
+    } else {
+      if (!state.manualPause) {
+        state.elapsed += simDt;
+        accumulateSafehouseClockFreeze(simDt);
+      }
+      return;
+    }
+  }
+
+  if (state.manualPause) return;
+
   state.elapsed += simDt;
+  accumulateSafehouseClockFreeze(simDt);
   if (state.pausedForRoulette) {
     updateRouletteUi(simDt);
     return;
   }
+  if (state.pausedForSafehousePrompt || state.pausedForForge) return;
   updateRogueLineOfSightState();
   const enemiesFrozen = state.elapsed < state.playerHeadstartUntil;
   const timelockWorldFrozen =
@@ -5235,6 +6265,7 @@ function update(dt) {
   }
   clampPlayerToArenaNexusInnerHex();
   clampPlayerToSurgeLockHex();
+  clampPlayerOutOfSpentSafehouseCore();
   if (moving && moveRes.touchedObstacle && passive.obstacleTouchMult > 1) {
     inventory.spadesObstacleBoostUntil = state.elapsed + TERRAIN_SPEED_BOOST_LINGER;
   }
@@ -5243,6 +6274,9 @@ function update(dt) {
   updatePlayerVelocity(dt);
   updateArenaNexus(simDt);
   updateRouletteHex(simDt);
+  updateSafehouseHex(simDt);
+  updateForgeHex(simDt);
+  updateSafehouseSpendAfterLevelLeave();
   updateSurgeHex(simDt);
   if (!pauseHostiles) {
     moveHunters(enemySimDt);
@@ -5258,7 +6292,14 @@ function update(dt) {
     updateCollisions();
   }
   updateCardPickups();
-  if (state.setBonusChoicePendingSuit && state.inventoryModalOpen && !state.pausedForRoulette) showSetBonusChoice();
+  if (
+    state.setBonusChoicePendingSuit &&
+    state.inventoryModalOpen &&
+    !state.pausedForRoulette &&
+    !state.pausedForSafehousePrompt &&
+    !state.pausedForForge
+  )
+    showSetBonusChoice();
 }
 
 function drawHud() {
@@ -5266,14 +6307,15 @@ function drawHud() {
   ctx.textBaseline = "top";
   ctx.fillStyle = "#e2e8f0";
   ctx.font = "15px Arial";
-  ctx.fillText("Survival: " + state.elapsed.toFixed(1) + "s", 14, 12);
+  ctx.fillText("Survival: " + runClockEffectiveSec().toFixed(1) + "s", 14, 12);
   ctx.fillText("Best: " + state.bestSurvival.toFixed(1) + "s", 14, 32);
-  ctx.fillText("Wave: " + state.wave, 14, 52);
-  ctx.fillText("Hunters: " + entities.hunters.length, 14, 72);
+  ctx.fillText("Level: " + displayWorldLevel(), 14, 52);
+  ctx.fillText("Wave: " + state.wave, 14, 72);
+  ctx.fillText("Hunters: " + entities.hunters.length, 14, 92);
   if (selectedCharacter.id === "rogue") {
     const ratio = clamp(state.rogueHunger / Math.max(0.001, state.rogueHungerMax), 0, 1);
     const x = 14;
-    const y = 94;
+    const y = 114;
     const w = 160;
     const h = 10;
     ctx.fillStyle = "rgba(51, 65, 85, 0.9)";
@@ -5648,6 +6690,51 @@ function drawLaserBeamFancy(ctx, beam) {
   ctx.restore();
 }
 
+function drawRunLevelUpCinematic() {
+  const cin = state.runLevelUpCinematic;
+  if (!cin) return;
+  const age = performance.now() - cin.startMs;
+  if (age >= RUN_LEVEL_UP_CINEMATIC_MS) return;
+  const w = world.w;
+  const h = world.h;
+  let dark = 0;
+  let flash = 0;
+  if (age < 620) {
+    dark = (age / 620) * 0.84;
+  } else if (age < 820) {
+    const u = (age - 620) / 200;
+    dark = 0.84 * (1 - u * u);
+    flash = Math.sin(u * Math.PI) * 0.95;
+  } else if (age < 1380) {
+    const u = (age - 820) / 560;
+    flash = (1 - u) * 0.22;
+    dark = 0;
+  }
+  if (dark > 0) {
+    ctx.fillStyle = `rgba(2, 6, 23, ${dark})`;
+    ctx.fillRect(0, 0, w, h);
+  }
+  if (flash > 0) {
+    ctx.fillStyle = `rgba(255, 253, 245, ${flash})`;
+    ctx.fillRect(0, 0, w, h);
+  }
+  if (age >= 780 && age < 2480) {
+    const te = clamp((age - 780) / 400, 0, 1);
+    const tout = age > 1980 ? clamp((2480 - age) / 500, 0, 1) : 1;
+    const ta = (0.2 + 0.8 * Math.sin(te * (Math.PI / 2))) * tout;
+    ctx.save();
+    ctx.textAlign = "center";
+    ctx.textBaseline = "middle";
+    ctx.font = `bold ${Math.round(44 + 18 * te)}px Arial`;
+    ctx.fillStyle = `rgba(248, 250, 252, ${ta})`;
+    ctx.shadowColor = "rgba(251, 191, 36, 0.65)";
+    ctx.shadowBlur = 22 + 16 * te;
+    ctx.fillText(`LEVEL ${cin.announceLevel}`, w / 2, h / 2);
+    ctx.shadowBlur = 0;
+    ctx.restore();
+  }
+}
+
 function render(tsMs) {
   const deathElapsed = state.running ? 0 : Math.max(0, (tsMs - state.deathStartedAtMs) / 1000);
   const deathAnimDone = !state.running && deathElapsed >= DEATH_ANIM_DURATION;
@@ -5663,17 +6750,33 @@ function render(tsMs) {
   ctx.save();
   ctx.translate(-cameraX + shake.x, -cameraY + shake.y);
   drawObstacles(ctx, obstacles);
+  drawSafehouseHexWorld(ctx);
   drawArenaNexusWorld(ctx);
   drawRouletteHexWorld(ctx);
   drawSurgeHexWorld(ctx);
-  if (hasAnyRouletteHexSite() && state.elapsed < state.rouletteScreenFlashUntil) {
+  if (
+    state.elapsed < state.rouletteScreenFlashUntil &&
+    (hasAnyRouletteHexSite() || state.safehouseInnerFacilitiesUnlocked)
+  ) {
     const u = clamp((state.rouletteScreenFlashUntil - state.elapsed) / 0.4, 0, 1);
     ctx.fillStyle = `rgba(220, 38, 38, ${0.38 * u})`;
-    for (const { q, r } of collectRouletteHexAxials()) {
-      const c = hexToWorld(q, r);
-      ctx.beginPath();
-      ctx.arc(c.x, c.y, HEX_SIZE * 0.98, 0, TAU);
-      ctx.fill();
+    if (hasAnyRouletteHexSite()) {
+      for (const { q, r } of collectRouletteHexAxials()) {
+        const c = hexToWorld(q, r);
+        ctx.beginPath();
+        ctx.arc(c.x, c.y, HEX_SIZE * 0.98, 0, TAU);
+        ctx.fill();
+      }
+    }
+    if (state.safehouseInnerFacilitiesUnlocked) {
+      const prim = getPrimarySafehouseAxial();
+      if (prim) {
+        const rw = getSafehouseEmbeddedRouletteWorld(prim);
+        const rr = safehouseEmbedSiteHitR();
+        ctx.beginPath();
+        ctx.arc(rw.x, rw.y, rr, 0, TAU);
+        ctx.fill();
+      }
     }
   }
   if (state.surgePhase === 2 && state.elapsed < state.surgeScreenFlashUntil) {
@@ -6106,11 +7209,16 @@ function render(tsMs) {
     ctx.globalAlpha = 1;
   }
 
-  const playerInvuln =
+  let playerBodyAlpha =
     state.elapsed < state.playerInvulnerableUntil
       ? 0.45 + 0.4 * (0.5 + 0.5 * Math.sin(state.elapsed * 32))
       : 1;
-  drawPlayerBody(ctx, playerInvuln);
+  if (selectedCharacter.id === "knight" && state.elapsed < inventory.clubsInvisUntil) {
+    const pulse = 0.5 + 0.5 * Math.sin(state.elapsed * 12);
+    const ghostAlpha = clamp(0.34 + 0.16 * pulse, 0.28, 0.52);
+    playerBodyAlpha = Math.min(playerBodyAlpha, ghostAlpha);
+  }
+  drawPlayerBody(ctx, playerBodyAlpha);
   if (state.playerTimelockUntil > 0) {
     const timePulse = 0.6 + 0.4 * (0.5 + 0.5 * Math.sin(state.elapsed * 14));
     drawCircle(ctx, player.x, player.y, player.r + 10 + timePulse * 4, "#c084fc", 0.18);
@@ -6202,9 +7310,9 @@ function render(tsMs) {
     ctx.globalAlpha = 1;
   }
   if (state.elapsed < player.burstUntil) {
-    drawCircle(ctx, player.x, player.y, player.r + 4, "#22d3ee", 0.3 * playerInvuln);
+    drawCircle(ctx, player.x, player.y, player.r + 4, "#22d3ee", 0.3 * playerBodyAlpha);
   } else if (state.elapsed < player.ultimateSpeedUntil) {
-    drawCircle(ctx, player.x, player.y, player.r + 5, "#fde68a", 0.28 * playerInvuln);
+    drawCircle(ctx, player.x, player.y, player.r + 5, "#fde68a", 0.28 * playerBodyAlpha);
   }
   for (const popup of entities.healPopups) {
     const t = clamp((state.elapsed - popup.bornAt) / Math.max(0.001, popup.expiresAt - popup.bornAt), 0, 1);
@@ -6269,6 +7377,8 @@ function render(tsMs) {
   }
 
   ctx.restore();
+
+  drawRunLevelUpCinematic();
 
   // Capture death snapshots from the clean gameplay frame before screen-space damage/death overlays.
   if (state.snapshotPending) {
@@ -6409,7 +7519,12 @@ function loop(ts) {
 }
 
 function onAbilityKey(key) {
-  if (state.pausedForCard || state.pausedForRoulette) return;
+  if (
+    state.runLevelUpCinematic &&
+    performance.now() - state.runLevelUpCinematic.startMs < RUN_LEVEL_UP_CINEMATIC_MS
+  )
+    return;
+  if (state.pausedForCard || state.pausedForRoulette || state.pausedForSafehousePrompt || state.pausedForForge) return;
   if (key === abilities.dash.key) {
     if (selectedCharacter.id === "rogue") {
       startRogueDashAim();
@@ -6449,11 +7564,27 @@ window.addEventListener("keydown", (event) => {
     closeRouletteForgeUi();
     return;
   }
+  if (state.pausedForSafehousePrompt && key === "escape") {
+    event.preventDefault();
+    closeSafehouseLevelModal();
+    return;
+  }
+  if (state.pausedForForge && key === "escape") {
+    event.preventDefault();
+    closeForgeModalUi();
+    return;
+  }
   if (state.inventoryModalOpen && !state.pausedForRoulette && (key === "enter" || key === " " || key === "escape")) {
     continueAfterLoadout();
     return;
   }
-  if (key === " " && !state.pausedForCard && !state.inventoryModalOpen) {
+  if (
+    key === " " &&
+    !state.pausedForCard &&
+    !state.inventoryModalOpen &&
+    !state.pausedForSafehousePrompt &&
+    !state.pausedForForge
+  ) {
     state.manualPause = true;
     runLog.event(LogCodes.EVT_MANUAL_PAUSE, "Manual pause: paused (Space)");
     state.keys.clear();
@@ -6491,6 +7622,23 @@ if (cardSkipButton) {
 if (cardCloseButton) {
   cardCloseButton.addEventListener("click", () => continueAfterLoadout());
 }
+
+if (safehouseLevelYes) {
+  safehouseLevelYes.addEventListener("click", () => {
+    const prim = getPrimarySafehouseAxial();
+    const tileK = prim ? hexKey(prim.q, prim.r) : "";
+    closeSafehouseLevelModal();
+    applySafehouseLevelUp();
+    player.hp = player.maxHp;
+    state.runLevelUpCinematic = { startMs: performance.now(), announceLevel: displayWorldLevel() };
+    state.safehouseEmbedRevealAtMs = performance.now() + 830;
+    if (tileK) {
+      state.safehouseAwaitingLeaveAfterLevelUp = true;
+      state.safehouseLevelUpTileKey = tileK;
+    }
+  });
+}
+if (safehouseLevelNo) safehouseLevelNo.addEventListener("click", () => closeSafehouseLevelModal());
 
 wireCharacterSelect();
 syncSpecialTestWestPanelLock();
