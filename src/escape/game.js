@@ -10,9 +10,97 @@ import {
   SNIPER_ARTILLERY_BANG_DURATION,
   tileGridDims,
 } from "./constants.js";
+import {
+  DEATH_ANIM_DURATION,
+  PICKUP_SPAWN_INTERVAL,
+  CARD_SPAWN_INTERVAL,
+  LOOT_DENSITY_BASE_ACTIVE_HEXES,
+  TERRAIN_SPEED_BOOST_LINGER,
+  ROGUE_STEALTH_AFTER_LOS_BREAK,
+  ROGUE_STEALTH_OPEN_GRACE,
+  KNIGHT_SPADES_WORLD_SLOW_MULT,
+  KNIGHT_SPADES_WORLD_SLOW_SEC,
+  SPAWN_INTERVAL_START,
+  SPAWN_INTERVAL_FLOOR,
+  DANGER_RAMP_SECONDS,
+  KNIGHT_DIAMOND_BURST_SPEED_MULT,
+  KNIGHT_DIAMOND_BURST_DURATION_BONUS_SEC,
+  LATE_GAME_ELITE_SPAWN_SEC,
+  MIDGAME_ESCALATION_START_SEC,
+  MIDGAME_ESCALATION_INTERVAL_SEC,
+  MIDGAME_ESCALATION_SPEED_FACTOR,
+  BASE_WAVE_SPAWN_JOBS,
+  AIR_SPAWNER_CHASE_SPEED,
+  LASER_BLUE_COOLDOWN_SEC,
+  LASER_BLUE_WARN_SEC,
+  LASER_BLUE_PLAYER_SLOW_MULT,
+  LASER_BLUE_PLAYER_SLOW_SEC,
+  HUNTER_SPEED_AGE_COEFF,
+  SET_BONUS_SUIT_THRESHOLD,
+  SET_BONUS_SUIT_MAX,
+  HEARTS_13_DEATH_DEFY_CD_SEC,
+  SPADES_13_AURA_RADIUS_PX,
+  SPADES_13_ENEMY_DT_MULT,
+  CLUBS_13_HITBOX_MULT,
+  CLUBS_13_UNTARGETABLE_SEC,
+  PLAYER_BASE_HITBOX_R,
+  CARD_RANK_SPAWN_WEIGHT_MAX,
+  CARD_RANK_SPAWN_WEIGHT_MIN,
+  ULTIMATE_ABILITY_COOLDOWN_SEC,
+  ULT_BURST_RADIUS,
+  ULT_BURST_WAVE_COUNT,
+  ULT_BURST_WAVE_SPAN_SEC,
+  ULT_ORBIT_SHIELD_RADIUS_EXTRA,
+  ULT_ORBIT_SHIELD_STAGGER_SEC,
+  ROGUE_FOOD_HUNGER_RESTORE,
+  ROGUE_FOOD_LIFETIME,
+  ROGUE_FOOD_SENSE_DURATION,
+  ROGUE_FOOD_ARROW_CLOSE_PLATEAU,
+  ROGUE_FOOD_ARROW_FAR_LEN,
+  ROGUE_DESPERATION_SPEED_MAX,
+  CAMERA_FOLLOW_LERP,
+  CHARACTERS,
+  HEX_SIZE,
+  SQRT3,
+  HEX_DIRS,
+  ARENA_NEXUS_SIEGE_SEC,
+  ARENA_NEXUS_INNER_HEX_SCALE,
+  ARENA_NEXUS_INNER_ENTER_R,
+  ARENA_NEXUS_INNER_APOTHEM,
+  ARENA_NEXUS_RING_LO,
+  ARENA_NEXUS_RING_HI,
+  ARENA_NEXUS_RING_LASER_SPAWN_INTERVAL,
+  ARENA_NEXUS_RING_SNIPER_SPAWN_INTERVAL,
+  ARENA_NEXUS_REWARD_MODAL_DELAY_SEC,
+  SPECIAL_HEX_POOL_WEIGHT,
+  PROCEDURAL_SPECIAL_COOLDOWN_TILES,
+  PROCEDURAL_SPECIAL_HEX_MIN_ELAPSED_SEC,
+  ROULETTE_INNER_HIT_R,
+  ROULETTE_INNER_HEX_DRAW_R,
+  ROULETTE_SPIN_SHUFFLE_SEC,
+  ROULETTE_SPIN_WHITEOUT_SEC,
+  SURGE_HEX_WAVES,
+  SURGE_TRAVEL_DUR_FIRST,
+  SURGE_TRAVEL_DUR_DECREMENT_PER_WAVE,
+  SURGE_WAVE_PAUSE_SEC,
+  SURGE_TILE_DAMAGE,
+  SURGE_TILE_FLASH_SEC,
+  SURGE_SAFE_HEX_DRAW_R,
+  SURGE_SAFE_HIT_R,
+  SURGE_SAFE_MIN_CENTER_SEP_PX,
+} from "./balance.js";
+import { hexToWorld, worldToHex, hexKey } from "./hex-math.js";
+import { createRunLog } from "./dev/run-log.js";
+import * as LogCodes from "./dev/log-codes.js";
 import { clamp, distSq, pointToSegmentDistance, rand, intersectsRectCircle, lineIntersectsRect } from "./math.js";
 import { generateHexTileObstacles } from "./tiles.js";
-import { drawCircle, drawHealPickup, drawObstacles } from "./draw.js";
+import {
+  drawCircle,
+  drawHealPickup,
+  drawObstacles,
+  strokePointyHexOutline,
+  fillPointyHexRainbowGlow,
+} from "./draw.js";
 
 export function mountEscape({
   canvas,
@@ -51,6 +139,14 @@ export function mountEscape({
       return false;
     }
   })();
+  const runLog = createRunLog({ enabled: escapeLocalDevHost });
+  runLog.event(LogCodes.EVT_SESSION_START, "Escape session mounted", { sessionId: runLog.sessionId });
+  if (escapeLocalDevHost) {
+    const runLogPrintBtn = document.getElementById("run-log-print-console");
+    const runLogDownloadBtn = document.getElementById("run-log-download-txt");
+    if (runLogPrintBtn) runLogPrintBtn.addEventListener("click", () => runLog.printToConsole());
+    if (runLogDownloadBtn) runLogDownloadBtn.addEventListener("click", () => runLog.downloadTxt());
+  }
   const deathSnapshotsEnabled = escapeLocalDevHost;
   if (!deathSnapshotsEnabled) {
     const meta = snapshotFolderButton?.closest(".meta");
@@ -70,112 +166,6 @@ const postFxCtx = postFxCanvas.getContext("2d");
   const VIEW_W = world.w;
   const VIEW_H = world.h;
   const { TILE_COLS, TILE_ROWS } = tileGridDims(world.h);
-const DEATH_ANIM_DURATION = 0.42;
-const PICKUP_SPAWN_INTERVAL = 3.2;
-const CARD_SPAWN_INTERVAL = 8.5;
-const LOOT_DENSITY_BASE_ACTIVE_HEXES = 3;
-const TERRAIN_SPEED_BOOST_LINGER = 0.16;
-const ROGUE_STEALTH_AFTER_LOS_BREAK = 0.35;
-const ROGUE_STEALTH_OPEN_GRACE = 0.4;
-/** Knight Spades set bonus: after using R (ultimate), non-player simulation uses this `dt` multiplier for this many seconds. */
-const KNIGHT_SPADES_WORLD_SLOW_MULT = 0.3;
-const KNIGHT_SPADES_WORLD_SLOW_SEC = 2;
-
-/** Hunter wave spacing at run start (seconds until next wave after scheduling). */
-const SPAWN_INTERVAL_START = 8;
-/** Minimum seconds between hunter spawn waves once danger ramp is full (was 1.8). */
-const SPAWN_INTERVAL_FLOOR = 1.5;
-/** Survival time over which wave spacing eases from START → FLOOR (matches danger bar). */
-const DANGER_RAMP_SECONDS = 300;
-/** Knight + Diamonds speed burst path: multiplier vs default passive/active burst factor of 2 (+30% on that factor → 2.6). */
-const KNIGHT_DIAMOND_BURST_SPEED_MULT = 2.6;
-/** Extra seconds on W burst window when that path is active. */
-const KNIGHT_DIAMOND_BURST_DURATION_BONUS_SEC = 1.5;
-/** From this many seconds, waves can include `airSpawner` and `laserBlue` elites. */
-const LATE_GAME_ELITE_SPAWN_SEC = 180;
-/** After this many seconds, every `MIDGAME_ESCALATION_INTERVAL_SEC` adds +5% enemy speed (compounding) and +1 spawn per wave. */
-const MIDGAME_ESCALATION_START_SEC = 240;
-const MIDGAME_ESCALATION_INTERVAL_SEC = 15;
-const MIDGAME_ESCALATION_SPEED_FACTOR = 1.05;
-const BASE_WAVE_SPAWN_JOBS = 14;
-/** Flying spawner chase speed (includes ~5% buff over original 84). */
-const AIR_SPAWNER_CHASE_SPEED = 84 * 1.05;
-/** Blue laser: time between full shot cycles (slightly longer than red). */
-const LASER_BLUE_COOLDOWN_SEC = 1.22;
-/** Blue laser: shorter warning = faster shot after aim (repositions quicker). */
-const LASER_BLUE_WARN_SEC = 0.3;
-/** Blue laser hit: player move speed multiplier. */
-const LASER_BLUE_PLAYER_SLOW_MULT = 0.8;
-const LASER_BLUE_PLAYER_SLOW_SEC = 1.5;
-/** Hunter `speedFactor` uses `1 + age * coeff` over each hunter's lifetime; was 0.9 (+0.9 max); +0.2 → 1.1 (+1.1 max). */
-const HUNTER_SPEED_AGE_COEFF = 1.1;
-/** Matching suit cards in the rank deck required to unlock that suit's set bonus. */
-const SET_BONUS_SUIT_THRESHOLD = 7;
-/** Full set: all 13 ranks of a suit in the deck unlock the second-tier bonus. */
-const SET_BONUS_SUIT_MAX = 13;
-/** Hearts 13: once per this many seconds, lethal damage sets HP to 5 instead. */
-const HEARTS_13_DEATH_DEFY_CD_SEC = 30;
-/** Spades 13: enemies/projectiles in this radius (px) use ~30% slower motion; ≈2in at 96 CSS px/in. */
-const SPADES_13_AURA_RADIUS_PX = 2 * 96;
-/** Spades 13: multiplier on hostile `dt` while inside the aura (30% slow). */
-const SPADES_13_ENEMY_DT_MULT = 0.7;
-/** Clubs 13: collision radius vs base `player.r`. */
-const CLUBS_13_HITBOX_MULT = 0.7;
-/** Clubs 13: after taking real HP damage, enemies ignore the player briefly. */
-const CLUBS_13_UNTARGETABLE_SEC = 1;
-const PLAYER_BASE_HITBOX_R = 10;
-/** Card pickup: spawn weight at rank 2 vs King (linear in between); doubles prior 12:1 curve. */
-const CARD_RANK_SPAWN_WEIGHT_MAX = 24;
-const CARD_RANK_SPAWN_WEIGHT_MIN = 1;
-/** Ultimate (R): cooldown after any ult use. */
-const ULTIMATE_ABILITY_COOLDOWN_SEC = 20;
-/** Push ult: radius per wave (was 140; doubled). */
-const ULT_BURST_RADIUS = 280;
-const ULT_BURST_WAVE_COUNT = 5;
-const ULT_BURST_WAVE_SPAN_SEC = 2;
-/** Orbiting ult shields: distance from player center (slightly farther than old single orbiter). */
-const ULT_ORBIT_SHIELD_RADIUS_EXTRA = 36;
-const ULT_ORBIT_SHIELD_STAGGER_SEC = 4;
-/** Food sets hunger to at least this many seconds (cap stays rogueHungerMax). */
-const ROGUE_FOOD_HUNGER_RESTORE = 30;
-/** Seconds food stays on the map before expiring. */
-const ROGUE_FOOD_LIFETIME = 21;
-/** Consume (E) food-sense overlay duration (screen arrows). */
-const ROGUE_FOOD_SENSE_DURATION = 2.35;
-/** World px: at or inside this distance to food, arrow size is maxed (no growth when closer). */
-const ROGUE_FOOD_ARROW_CLOSE_PLATEAU = 96;
-/** World px: beyond this, food-sense arrows use minimum size. */
-const ROGUE_FOOD_ARROW_FAR_LEN = 440;
-/** Rogue move speed bonus when starving; linear up to this fraction at 0 hunger. */
-const ROGUE_DESPERATION_SPEED_MAX = 0.2;
-const CAMERA_FOLLOW_LERP = 0.18;
-
-const CHARACTERS = {
-  knight: {
-    id: "knight",
-    name: "Knight",
-    baseHp: 10,
-    cooldownAbilityIds: ["dash", "burst", "decoy"],
-    abilities: {
-      dash: { key: "q", label: "Dash", cooldown: 2.2, minCooldown: 0.25 },
-      burst: { key: "w", label: "Burst", cooldown: 5, minCooldown: 0.4, duration: 3 },
-      decoy: { key: "e", label: "Decoy", cooldown: 8, minCooldown: 0.4 },
-      random: { key: "r", label: "Ultimate" },
-    },
-  },
-  rogue: {
-    id: "rogue",
-    name: "Hungry Rogue",
-    baseHp: 7,
-    cooldownAbilityIds: ["dash", "burst"],
-    abilities: {
-      dash: { key: "q", label: "Dash", cooldown: 2.2, minCooldown: 0.25 },
-      burst: { key: "w", label: "Smoke", cooldown: 16, minCooldown: 1, duration: 3 },
-      decoy: { key: "e", label: "Consume", cooldown: 4.5, minCooldown: 0.5 },
-      random: { key: "r", label: "Ultimate" },
-    },
-  },
-};
 
 let obstacles = [];
 let activePlayerHex = { q: 0, r: 0 };
@@ -185,71 +175,72 @@ let cameraY = 0;
 let lastPlayerHexKey = null;
 
 const tileCache = new Map();
-const HEX_SIZE = TILE_W * 1.15;
-const SQRT3 = Math.sqrt(3);
-const HEX_DIRS = [
-  { q: 1, r: 0 },
-  { q: 1, r: -1 },
-  { q: 0, r: -1 },
-  { q: -1, r: 0 },
-  { q: -1, r: 1 },
-  { q: 0, r: 1 },
-];
 
-const ARENA_NEXUS_SIEGE_SEC = 10;
-/** Inner “parallel” hex outline vs circumradius `HEX_SIZE`. */
-const ARENA_NEXUS_INNER_HEX_SCALE = 0.62;
-/** Distance from nexus center to inner threshold (pointy-top inradius of inner hex). */
-const ARENA_NEXUS_INNER_ENTER_R = HEX_SIZE * ARENA_NEXUS_INNER_HEX_SCALE * (SQRT3 / 2) * 0.96;
-/** Pointy-top inner hex apothem (center → flat edge) for `HEX_SIZE * ARENA_NEXUS_INNER_HEX_SCALE` vertex radius. */
-const ARENA_NEXUS_INNER_APOTHEM = HEX_SIZE * ARENA_NEXUS_INNER_HEX_SCALE * (SQRT3 / 2);
-const ARENA_NEXUS_RING_LO = HEX_SIZE * 0.66;
-const ARENA_NEXUS_RING_HI = HEX_SIZE * 0.93;
-/** Continuous spawn cadence for real laser / sniper hunters on the nexus ring. */
-const ARENA_NEXUS_RING_LASER_SPAWN_INTERVAL = 2.85;
-const ARENA_NEXUS_RING_SNIPER_SPAWN_INTERVAL = 3.45;
-/** After siege ends (green, defenders cleared), wait this long before opening the card reward modal. */
-const ARENA_NEXUS_REWARD_MODAL_DELAY_SEC = 1.35;
-/** Rare special hex pool weight: `1/15` per first-time generated neighbor tile (when off cooldown). */
-const SPECIAL_HEX_POOL_WEIGHT = 1 / 15;
-/** After a procedural special is placed, this many subsequent newly generated tiles skip the roll (then 1/15 resumes). */
-const PROCEDURAL_SPECIAL_COOLDOWN_TILES = 10;
-/** ~1in at 96 CSS px/in: inner rainbow forge disc radius (px). */
-const ROULETTE_INNER_HIT_R = 52;
-const ROULETTE_INNER_HEX_DRAW_R = 46;
-/** Suit shuffle: swap / flicker between the two forged options. */
-const ROULETTE_SPIN_SHUFFLE_SEC = 2.15;
-/** Soft veil before final reveal (gentler than solid white). */
-const ROULETTE_SPIN_WHITEOUT_SEC = 0.42;
+/** When an arena nexus hex leaves the active 7-tile window, clear global arena run state so it can fire again on return. */
+function resetArenaNexusIfArenaHexEvicted(cacheKey) {
+  const parts = cacheKey.split(",");
+  if (parts.length !== 2) return;
+  const q = Number(parts[0]);
+  const r = Number(parts[1]);
+  if (!Number.isFinite(q) || !Number.isFinite(r)) return;
+  const k = hexKey(q, r);
+  const isArena =
+    state.proceduralArenaKeys.has(k) ||
+    state.proceduralArenaSpentKeys.has(k) ||
+    (escapeLocalDevHost && state.testWestKind === "arena" && q === state.testWestQ && r === state.testWestR);
+  if (!isArena) return;
 
-function hexToWorld(q, r) {
-  return {
-    x: HEX_SIZE * SQRT3 * (q + r / 2),
-    y: HEX_SIZE * 1.5 * r,
-  };
+  // Joker reward may still be scheduled; grant it before clearing timers so it is not lost on wander-off.
+  if (state.arenaPhase === 2 && state.arenaCardRewardAt > 0 && !state.pausedForCard) {
+    openCardPickupModal(makeJokerArenaRewardCard());
+    state.arenaCardRewardAt = 0;
+  } else if (state.arenaPhase === 2 && state.arenaCardRewardAt > 0) {
+    state.arenaCardRewardAt = 0;
+  }
+
+  if (state.arenaPhase === 1) cleanupArenaNexusSiegeCombat();
+  state.arenaPhase = 0;
+  state.arenaSiegeEndAt = 0;
+  state.arenaNextLaserEnemyAt = 0;
+  state.arenaNextSniperEnemyAt = 0;
 }
 
-function worldToHex(x, y) {
-  const qf = (SQRT3 / 3 * x - 1 / 3 * y) / HEX_SIZE;
-  const rf = (2 / 3 * y) / HEX_SIZE;
-  // cube-round axial
-  let xCube = qf;
-  let zCube = rf;
-  let yCube = -xCube - zCube;
-  let rx = Math.round(xCube);
-  let ry = Math.round(yCube);
-  let rz = Math.round(zCube);
-  const xDiff = Math.abs(rx - xCube);
-  const yDiff = Math.abs(ry - yCube);
-  const zDiff = Math.abs(rz - zCube);
-  if (xDiff > yDiff && xDiff > zDiff) rx = -ry - rz;
-  else if (yDiff > zDiff) ry = -rx - rz;
-  else rz = -rx - ry;
-  return { q: rx, r: rz };
-}
-
-function hexKey(q, r) {
-  return `${q},${r}`;
+function resetSurgeHexIfSurgeHexEvicted(cacheKey) {
+  const parts = cacheKey.split(",");
+  if (parts.length !== 2) return;
+  const q = Number(parts[0]);
+  const r = Number(parts[1]);
+  if (!Number.isFinite(q) || !Number.isFinite(r)) return;
+  const k = hexKey(q, r);
+  const isSurge =
+    state.proceduralSurgeKeys.has(k) ||
+    state.proceduralSurgeSpentKeys.has(k) ||
+    (escapeLocalDevHost && state.testWestKind === "surge" && q === state.testWestQ && r === state.testWestR);
+  if (!isSurge) return;
+  if (
+    (state.surgePhase === 1 ||
+      state.surgePhase === 2 ||
+      state.surgePhase === 3 ||
+      state.surgePhase === 4) &&
+    state.surgeLockQ === q &&
+    state.surgeLockR === r
+  ) {
+    if (
+      (state.surgePhase === 3 || state.surgePhase === 4) &&
+      state.surgeCardRewardAt > 0 &&
+      !state.pausedForCard
+    ) {
+      openCardPickupModal(makeJokerArenaRewardCard());
+      state.surgeCardRewardAt = 0;
+    }
+    state.surgePhase = 0;
+    state.surgeAwait = "travel";
+    state.surgeWave = 1;
+    state.surgeScreenFlashUntil = 0;
+    state.surgeHasPrevSafeBubble = false;
+    state.surgeEligibleForInnerExitReward = false;
+    state.surgeCardRewardAt = 0;
+  }
 }
 
 function ensureTilesForPlayer() {
@@ -266,7 +257,7 @@ function ensureTilesForPlayer() {
     if (!tileCache.has(key)) {
       tryProceduralRareSpecialHex(h.q, h.r);
       const c = hexToWorld(h.q, h.r);
-      const emptyTerrain = isArenaNexusTile(h.q, h.r) || isRouletteHexTile(h.q, h.r);
+      const emptyTerrain = isArenaNexusTile(h.q, h.r) || isRouletteHexTile(h.q, h.r) || isSurgeHexTile(h.q, h.r);
       tileCache.set(
         key,
         generateHexTileObstacles(h.q, h.r, {
@@ -284,7 +275,11 @@ function ensureTilesForPlayer() {
   }
   const neededKeys = new Set(needed.map((h) => hexKey(h.q, h.r)));
   for (const key of Array.from(tileCache.keys())) {
-    if (!neededKeys.has(key)) tileCache.delete(key);
+    if (!neededKeys.has(key)) {
+      resetArenaNexusIfArenaHexEvicted(key);
+      resetSurgeHexIfSurgeHexEvicted(key);
+      tileCache.delete(key);
+    }
   }
 
   obstacles = [];
@@ -296,7 +291,7 @@ function ensureTilesForPlayer() {
 function readTestSpecialWestSelection() {
   if (!escapeLocalDevHost) return "na";
   const raw = String(specialTestWestSelect?.value ?? "na").toLowerCase();
-  if (raw === "arena" || raw === "roulette") return raw;
+  if (raw === "arena" || raw === "roulette" || raw === "surge") return raw;
   return "na";
 }
 
@@ -314,10 +309,14 @@ function initSpecialHexTiles(spawnQ, spawnR) {
   state.testWestQ = westQ;
   state.testWestR = westR;
   const mode = readTestSpecialWestSelection();
-  state.testWestKind = mode === "arena" ? "arena" : mode === "roulette" ? "roulette" : "none";
+  state.testWestKind = mode === "arena" ? "arena" : mode === "roulette" ? "roulette" : mode === "surge" ? "surge" : "none";
 
   state.proceduralArenaKeys.clear();
   state.proceduralRouletteKeys.clear();
+  state.proceduralSurgeKeys.clear();
+  state.proceduralArenaSpentKeys.clear();
+  state.proceduralRouletteSpentKeys.clear();
+  state.proceduralSurgeSpentKeys.clear();
   state.proceduralSpecialCooldownTiles = 0;
   state.arenaSiegeQ = spawnQ;
   state.arenaSiegeR = spawnR;
@@ -339,6 +338,46 @@ function initSpecialHexTiles(spawnQ, spawnR) {
   state.rouletteOptionB = null;
   state.rouletteSpinShuffleUntil = 0;
   state.rouletteSpinRevealAt = 0;
+  state.surgePhase = 0;
+  state.surgeLockQ = 0;
+  state.surgeLockR = 0;
+  state.surgeWave = 1;
+  state.surgeAwait = "travel";
+  state.surgeTravelStartAt = 0;
+  state.surgeTravelDur = SURGE_TRAVEL_DUR_FIRST;
+  state.surgePauseEndAt = 0;
+  state.surgeSafeX = 0;
+  state.surgeSafeY = 0;
+  state.surgePrevSafeX = 0;
+  state.surgePrevSafeY = 0;
+  state.surgeHasPrevSafeBubble = false;
+  state.surgeWasInSurgeHex = false;
+  state.surgeScreenFlashUntil = 0;
+  state.surgeEligibleForInnerExitReward = false;
+  state.surgeCardRewardAt = 0;
+  state.rouletteLockQ = 0;
+  state.rouletteLockR = 0;
+}
+
+function markProceduralArenaHexSpent(q, r) {
+  const k = hexKey(q, r);
+  if (!state.proceduralArenaKeys.has(k)) return;
+  state.proceduralArenaKeys.delete(k);
+  state.proceduralArenaSpentKeys.add(k);
+}
+
+function markProceduralRouletteHexSpent(q, r) {
+  const k = hexKey(q, r);
+  if (!state.proceduralRouletteKeys.has(k)) return;
+  state.proceduralRouletteKeys.delete(k);
+  state.proceduralRouletteSpentKeys.add(k);
+}
+
+function markProceduralSurgeHexSpent(q, r) {
+  const k = hexKey(q, r);
+  if (!state.proceduralSurgeKeys.has(k)) return;
+  state.proceduralSurgeKeys.delete(k);
+  state.proceduralSurgeSpentKeys.add(k);
 }
 
 function firstProceduralArenaAxial() {
@@ -371,6 +410,10 @@ function collectArenaNexusAxials() {
     const [q, r] = k.split(",").map(Number);
     add(q, r);
   }
+  for (const k of state.proceduralArenaSpentKeys) {
+    const [q, r] = k.split(",").map(Number);
+    add(q, r);
+  }
   if (escapeLocalDevHost && state.testWestKind === "arena") add(state.testWestQ, state.testWestR);
   return out;
 }
@@ -388,6 +431,10 @@ function collectRouletteHexAxials() {
     const [q, r] = k.split(",").map(Number);
     add(q, r);
   }
+  for (const k of state.proceduralRouletteSpentKeys) {
+    const [q, r] = k.split(",").map(Number);
+    add(q, r);
+  }
   if (escapeLocalDevHost && state.testWestKind === "roulette") add(state.testWestQ, state.testWestR);
   return out;
 }
@@ -397,28 +444,436 @@ function hasAnyRouletteHexSite() {
 }
 
 function isArenaNexusTile(q, r) {
+  const k = hexKey(q, r);
+  if (state.proceduralArenaKeys.has(k) || state.proceduralArenaSpentKeys.has(k)) return true;
+  if (escapeLocalDevHost && state.testWestKind === "arena" && q === state.testWestQ && r === state.testWestR) return true;
+  return false;
+}
+
+function isArenaNexusInteractive(q, r) {
   if (state.proceduralArenaKeys.has(hexKey(q, r))) return true;
   if (escapeLocalDevHost && state.testWestKind === "arena" && q === state.testWestQ && r === state.testWestR) return true;
   return false;
 }
 
 function isRouletteHexTile(q, r) {
+  const k = hexKey(q, r);
+  if (state.proceduralRouletteKeys.has(k) || state.proceduralRouletteSpentKeys.has(k)) return true;
+  if (escapeLocalDevHost && state.testWestKind === "roulette" && q === state.testWestQ && r === state.testWestR) return true;
+  return false;
+}
+
+function isRouletteHexInteractive(q, r) {
   if (state.proceduralRouletteKeys.has(hexKey(q, r))) return true;
   if (escapeLocalDevHost && state.testWestKind === "roulette" && q === state.testWestQ && r === state.testWestR) return true;
   return false;
 }
 
+function collectSurgeHexAxials() {
+  const out = [];
+  const seen = new Set();
+  const add = (q, r) => {
+    const k = hexKey(q, r);
+    if (seen.has(k)) return;
+    seen.add(k);
+    out.push({ q, r });
+  };
+  for (const k of state.proceduralSurgeKeys) {
+    const [q, r] = k.split(",").map(Number);
+    add(q, r);
+  }
+  for (const k of state.proceduralSurgeSpentKeys) {
+    const [q, r] = k.split(",").map(Number);
+    add(q, r);
+  }
+  if (escapeLocalDevHost && state.testWestKind === "surge") add(state.testWestQ, state.testWestR);
+  return out;
+}
+
+function isSurgeHexTile(q, r) {
+  const k = hexKey(q, r);
+  if (state.proceduralSurgeKeys.has(k) || state.proceduralSurgeSpentKeys.has(k)) return true;
+  if (escapeLocalDevHost && state.testWestKind === "surge" && q === state.testWestQ && r === state.testWestR) return true;
+  return false;
+}
+
+function isSurgeHexInteractive(q, r) {
+  if (state.proceduralSurgeKeys.has(hexKey(q, r))) return true;
+  if (escapeLocalDevHost && state.testWestKind === "surge" && q === state.testWestQ && r === state.testWestR) return true;
+  return false;
+}
+
+function surgeTravelDurationForWave(wave) {
+  return Math.max(
+    0.05,
+    SURGE_TRAVEL_DUR_FIRST - SURGE_TRAVEL_DUR_DECREMENT_PER_WAVE * (wave - 1)
+  );
+}
+
+/** Same walkable disc as arena nexus siege: inner hex apothem minus player radius. */
+function surgeLockTileMaxCenterDistPx() {
+  return Math.max(6, ARENA_NEXUS_INNER_APOTHEM - player.r - 0.75);
+}
+
+/** Full-tile walk disc while waiting on outer lock (before inner gauntlet starts). */
+function surgeOuterWaitingMaxCenterDistPx() {
+  return Math.max(6, HEX_SIZE * (SQRT3 / 2) - player.r - 1.5);
+}
+
+function pickSurgeSafeAndPulseFrom(q, r) {
+  const tc = hexToWorld(q, r);
+  const apo = HEX_SIZE * (SQRT3 / 2) * 0.72;
+  const maxSafeCenterDist = Math.max(10, surgeLockTileMaxCenterDistPx() - SURGE_SAFE_HIT_R - 8);
+  const distCap = Math.min(apo * 0.69, maxSafeCenterDist);
+  const minSep = SURGE_SAFE_MIN_CENTER_SEP_PX;
+
+  const inPlayDisc = (sx, sy) => Math.hypot(sx - tc.x, sy - tc.y) <= maxSafeCenterDist + 1e-3;
+  const farEnoughFromPrev = (sx, sy) => {
+    if (!state.surgeHasPrevSafeBubble) return true;
+    return Math.hypot(sx - state.surgePrevSafeX, sy - state.surgePrevSafeY) >= minSep - 1e-3;
+  };
+
+  let sx = tc.x;
+  let sy = tc.y;
+  let found = false;
+  for (let a = 0; a < 56; a++) {
+    const ang = Math.random() * TAU;
+    const dist = ((0.14 + Math.random() * 0.55) / 0.69) * distCap;
+    const tx = tc.x + Math.cos(ang) * dist;
+    const ty = tc.y + Math.sin(ang) * dist;
+    if (inPlayDisc(tx, ty) && farEnoughFromPrev(tx, ty)) {
+      sx = tx;
+      sy = ty;
+      found = true;
+      break;
+    }
+  }
+  if (!found && state.surgeHasPrevSafeBubble) {
+    const px = state.surgePrevSafeX;
+    const py = state.surgePrevSafeY;
+    for (let i = 0; i < 40; i++) {
+      const ang = (i / 40) * TAU;
+      const tx = px + Math.cos(ang) * minSep;
+      const ty = py + Math.sin(ang) * minSep;
+      if (inPlayDisc(tx, ty) && farEnoughFromPrev(tx, ty)) {
+        sx = tx;
+        sy = ty;
+        found = true;
+        break;
+      }
+    }
+  }
+  if (!found && state.surgeHasPrevSafeBubble) {
+    const vx = tc.x - state.surgePrevSafeX;
+    const vy = tc.y - state.surgePrevSafeY;
+    const vlen = Math.hypot(vx, vy) || 1;
+    const ux = vx / vlen;
+    const uy = vy / vlen;
+    for (let s = maxSafeCenterDist; s >= minSep * 0.4; s -= maxSafeCenterDist * 0.07) {
+      const tx = tc.x + ux * s;
+      const ty = tc.y + uy * s;
+      if (inPlayDisc(tx, ty) && farEnoughFromPrev(tx, ty)) {
+        sx = tx;
+        sy = ty;
+        found = true;
+        break;
+      }
+    }
+  }
+  if (!found && state.surgeHasPrevSafeBubble) {
+    for (let b = 0; b < 48; b++) {
+      const ang = Math.random() * TAU;
+      const dist = (0.3 + Math.random() * 0.7) * distCap;
+      const tx = tc.x + Math.cos(ang) * dist;
+      const ty = tc.y + Math.sin(ang) * dist;
+      if (inPlayDisc(tx, ty) && farEnoughFromPrev(tx, ty)) {
+        sx = tx;
+        sy = ty;
+        found = true;
+        break;
+      }
+    }
+  }
+  if (!found) {
+    const ang = Math.random() * TAU;
+    const dist = ((0.14 + Math.random() * 0.55) / 0.69) * distCap;
+    sx = tc.x + Math.cos(ang) * dist;
+    sy = tc.y + Math.sin(ang) * dist;
+  }
+  state.surgeSafeX = sx;
+  state.surgeSafeY = sy;
+  state.surgePrevSafeX = sx;
+  state.surgePrevSafeY = sy;
+  state.surgeHasPrevSafeBubble = true;
+}
+
+function beginSurgeTravelWave() {
+  pickSurgeSafeAndPulseFrom(state.surgeLockQ, state.surgeLockR);
+  state.surgeTravelDur = surgeTravelDurationForWave(state.surgeWave);
+  state.surgeTravelStartAt = state.elapsed;
+  state.surgeAwait = "travel";
+}
+
+function surgeHitNow() {
+  state.surgeScreenFlashUntil = state.elapsed + SURGE_TILE_FLASH_SEC;
+  triggerUltScreenShake(12, 0.18);
+  const inSafe = Math.hypot(player.x - state.surgeSafeX, player.y - state.surgeSafeY) <= SURGE_SAFE_HIT_R;
+  if (!inSafe) damagePlayer(SURGE_TILE_DAMAGE, { surgeHexPulse: true });
+}
+
+function killHuntersOnSurgeHex(q, r) {
+  for (let i = entities.hunters.length - 1; i >= 0; i--) {
+    const h = entities.hunters[i];
+    const hq = worldToHex(h.x, h.y);
+    if (hq.q !== q || hq.r !== r) continue;
+    if (h.type === "spawner" || h.type === "airSpawner") {
+      ejectSpawnerHunterFromSpecialHexFootprint(h);
+      continue;
+    }
+    entities.hunters.splice(i, 1);
+  }
+}
+
+function beginSurgeOuterLock(q, r) {
+  state.surgePhase = 1;
+  state.surgeLockQ = q;
+  state.surgeLockR = r;
+  state.surgeWave = 1;
+  state.surgeHasPrevSafeBubble = false;
+  state.surgeEligibleForInnerExitReward = false;
+  state.surgeCardRewardAt = 0;
+  killHuntersOnSurgeHex(q, r);
+  state.surgeAwait = "idle";
+  state.surgeScreenFlashUntil = 0;
+  clampPlayerToSurgeLockHex();
+}
+
+function beginSurgeGauntletActive() {
+  state.surgePhase = 2;
+  state.surgeWave = 1;
+  state.surgeHasPrevSafeBubble = false;
+  state.surgeEligibleForInnerExitReward = false;
+  state.surgeCardRewardAt = 0;
+  clampPlayerToSurgeLockHex();
+  beginSurgeTravelWave();
+}
+
+function ejectHuntersFromSurgeLockHex() {
+  if (state.surgePhase !== 1 && state.surgePhase !== 2 && state.surgePhase !== 3) return;
+  const edgeR = HEX_SIZE + 14;
+  const { x: cx, y: cy } = hexToWorld(state.surgeLockQ, state.surgeLockR);
+  for (const h of entities.hunters) {
+    if (h.arenaNexusSpawn) continue;
+    const hq = worldToHex(h.x, h.y);
+    if (hq.q !== state.surgeLockQ || hq.r !== state.surgeLockR) continue;
+    const dx = h.x - cx;
+    const dy = h.y - cy;
+    const len = Math.hypot(dx, dy) || 1;
+    h.x = cx + (dx / len) * (edgeR + h.r);
+    h.y = cy + (dy / len) * (edgeR + h.r);
+  }
+}
+
+function clampPlayerToSurgeLockHex() {
+  if (state.surgePhase !== 1 && state.surgePhase !== 2 && state.surgePhase !== 3) return;
+  const ph = worldToHex(player.x, player.y);
+  if (ph.q !== state.surgeLockQ || ph.r !== state.surgeLockR) return;
+  const c = hexToWorld(ph.q, ph.r);
+  const maxD =
+    state.surgePhase === 1 || state.surgePhase === 3
+      ? surgeOuterWaitingMaxCenterDistPx()
+      : surgeLockTileMaxCenterDistPx();
+  const dx = player.x - c.x;
+  const dy = player.y - c.y;
+  const d = Math.hypot(dx, dy) || 1;
+  if (d <= maxD) return;
+  player.x = c.x + (dx / d) * maxD;
+  player.y = c.y + (dy / d) * maxD;
+}
+
+function isWorldPointOnSurgeLockBarrierTile(px, py) {
+  if (state.surgePhase !== 1 && state.surgePhase !== 2 && state.surgePhase !== 3) return false;
+  const h = worldToHex(px, py);
+  if (h.q !== state.surgeLockQ || h.r !== state.surgeLockR) return false;
+  const c = hexToWorld(h.q, h.r);
+  return Math.hypot(px - c.x, py - c.y) <= HEX_SIZE + 4;
+}
+
+function updateSurgeHex(_dt) {
+  if (!state.running || state.pausedForRoulette) return;
+
+  if (
+    !state.pausedForCard &&
+    state.surgePhase === 3 &&
+    state.surgeCardRewardAt > 0 &&
+    state.elapsed >= state.surgeCardRewardAt
+  ) {
+    state.surgeCardRewardAt = 0;
+    openCardPickupModal(makeJokerArenaRewardCard());
+    state.surgePhase = 4;
+  }
+
+  if (state.pausedForCard) return;
+
+  const ph = worldToHex(player.x, player.y);
+  const inSurge = isSurgeHexTile(ph.q, ph.r);
+  if (!inSurge) {
+    state.surgeWasInSurgeHex = false;
+    if (state.surgePhase === 4) {
+      state.surgePhase = 0;
+    } else if (state.surgePhase === 3) {
+      if (state.surgeCardRewardAt > 0 && !state.pausedForCard) {
+        openCardPickupModal(makeJokerArenaRewardCard());
+        state.surgeCardRewardAt = 0;
+      }
+      state.surgePhase = 0;
+      state.surgeAwait = "travel";
+      state.surgeWave = 1;
+      state.surgeScreenFlashUntil = 0;
+      state.surgeHasPrevSafeBubble = false;
+      state.surgeEligibleForInnerExitReward = false;
+    } else if (state.surgePhase === 1 || state.surgePhase === 2) {
+      state.surgePhase = 0;
+      state.surgeAwait = "travel";
+      state.surgeWave = 1;
+      state.surgeScreenFlashUntil = 0;
+      state.surgeHasPrevSafeBubble = false;
+      state.surgeEligibleForInnerExitReward = false;
+      state.surgeCardRewardAt = 0;
+    }
+    return;
+  }
+  const enteredThisFrame = inSurge && !state.surgeWasInSurgeHex;
+  state.surgeWasInSurgeHex = true;
+  if (enteredThisFrame && state.surgePhase === 0 && isSurgeHexInteractive(ph.q, ph.r)) {
+    beginSurgeOuterLock(ph.q, ph.r);
+  }
+  if (state.surgePhase === 1 && ph.q === state.surgeLockQ && ph.r === state.surgeLockR) {
+    const c = hexToWorld(state.surgeLockQ, state.surgeLockR);
+    if (Math.hypot(player.x - c.x, player.y - c.y) <= ARENA_NEXUS_INNER_ENTER_R) {
+      beginSurgeGauntletActive();
+    }
+  }
+  if (state.surgePhase === 3 && ph.q === state.surgeLockQ && ph.r === state.surgeLockR) {
+    const c = hexToWorld(state.surgeLockQ, state.surgeLockR);
+    const d = Math.hypot(player.x - c.x, player.y - c.y);
+    if (state.surgeEligibleForInnerExitReward && d > ARENA_NEXUS_INNER_ENTER_R && state.surgeCardRewardAt <= 0) {
+      state.surgeEligibleForInnerExitReward = false;
+      state.surgeCardRewardAt = state.elapsed + ARENA_NEXUS_REWARD_MODAL_DELAY_SEC;
+    }
+  }
+  if (state.surgePhase !== 2) return;
+  if (ph.q !== state.surgeLockQ || ph.r !== state.surgeLockR) return;
+
+  if (state.surgeAwait === "travel") {
+    const u = (state.elapsed - state.surgeTravelStartAt) / Math.max(1e-4, state.surgeTravelDur);
+    if (u >= 1) {
+      surgeHitNow();
+      state.surgePauseEndAt = state.elapsed + SURGE_WAVE_PAUSE_SEC;
+      state.surgeAwait = "pause";
+    }
+  } else if (state.surgeAwait === "pause" && state.elapsed >= state.surgePauseEndAt) {
+    state.surgeWave += 1;
+    if (state.surgeWave > SURGE_HEX_WAVES) {
+      state.surgePhase = 3;
+      state.surgeAwait = "idle";
+      state.surgeEligibleForInnerExitReward = true;
+      state.surgeCardRewardAt = 0;
+      markProceduralSurgeHexSpent(state.surgeLockQ, state.surgeLockR);
+    } else {
+      beginSurgeTravelWave();
+    }
+  }
+}
+
+function drawSurgeHexWorld(ctx) {
+  const cells = collectSurgeHexAxials();
+  if (!cells.length) return;
+  const innerVertexR = HEX_SIZE * ARENA_NEXUS_INNER_HEX_SCALE;
+  for (const { q, r } of cells) {
+    const c = hexToWorld(q, r);
+    const cx = c.x;
+    const cy = c.y;
+    const isOuterWait = state.surgePhase === 1 && q === state.surgeLockQ && r === state.surgeLockR;
+    const isActiveGauntlet = state.surgePhase === 2 && q === state.surgeLockQ && r === state.surgeLockR;
+    const isInnerOpenOuterLocked =
+      state.surgePhase === 3 && q === state.surgeLockQ && r === state.surgeLockR;
+    const isFullyCleared = state.surgePhase === 4 && q === state.surgeLockQ && r === state.surgeLockR;
+    let outer = "rgba(59, 130, 246, 0.92)";
+    let inner = "rgba(96, 165, 250, 0.88)";
+    if (state.proceduralSurgeSpentKeys.has(hexKey(q, r))) {
+      outer = "rgba(34, 197, 94, 0.92)";
+      inner = "rgba(74, 222, 128, 0.88)";
+    } else if (isOuterWait) {
+      outer = "rgba(239, 68, 68, 0.95)";
+    } else if (isActiveGauntlet) {
+      outer = "rgba(239, 68, 68, 0.95)";
+      inner = "rgba(248, 113, 113, 0.9)";
+    } else if (isInnerOpenOuterLocked) {
+      outer = "rgba(239, 68, 68, 0.95)";
+      inner = "rgba(74, 222, 128, 0.88)";
+    } else if (isFullyCleared) {
+      outer = "rgba(34, 197, 94, 0.92)";
+      inner = "rgba(74, 222, 128, 0.88)";
+    }
+    strokePointyHexOutline(ctx, cx, cy, HEX_SIZE, outer, 3.2, 18);
+    strokePointyHexOutline(ctx, cx, cy, innerVertexR, inner, 2.4, 14);
+    if (isActiveGauntlet) {
+      ctx.save();
+      ctx.fillStyle = "rgba(248, 250, 252, 0.92)";
+      ctx.beginPath();
+      for (let i = 0; i < 6; i++) {
+        const a = -Math.PI / 2 + (Math.PI / 3) * i;
+        const x = state.surgeSafeX + Math.cos(a) * SURGE_SAFE_HEX_DRAW_R;
+        const y = state.surgeSafeY + Math.sin(a) * SURGE_SAFE_HEX_DRAW_R;
+        if (i === 0) ctx.moveTo(x, y);
+        else ctx.lineTo(x, y);
+      }
+      ctx.closePath();
+      ctx.fill();
+      ctx.strokeStyle = "rgba(255,255,255,0.55)";
+      ctx.lineWidth = 1.2;
+      ctx.stroke();
+      ctx.restore();
+      const u = clamp((state.elapsed - state.surgeTravelStartAt) / Math.max(1e-4, state.surgeTravelDur), 0, 1);
+      const pulseCx = cx + (state.surgeSafeX - cx) * u;
+      const pulseCy = cy + (state.surgeSafeY - cy) * u;
+      const pulseR = innerVertexR + (SURGE_SAFE_HEX_DRAW_R - innerVertexR) * u;
+      const pulseStroke = 2.4 + (3.2 - 2.4) * (1 - u);
+      strokePointyHexOutline(ctx, pulseCx, pulseCy, pulseR, "rgba(248, 113, 113, 0.95)", pulseStroke, 18);
+    }
+  }
+}
+
 function tryProceduralRareSpecialHex(q, r) {
+  if (state.elapsed < PROCEDURAL_SPECIAL_HEX_MIN_ELAPSED_SEC) return;
   if (state.proceduralSpecialCooldownTiles > 0) {
     state.proceduralSpecialCooldownTiles -= 1;
     return;
   }
-  if (isArenaNexusTile(q, r) || isRouletteHexTile(q, r)) return;
-  if (Math.random() >= SPECIAL_HEX_POOL_WEIGHT) return;
   const k = hexKey(q, r);
-  if (Math.random() < 0.5) state.proceduralArenaKeys.add(k);
-  else state.proceduralRouletteKeys.add(k);
+  if (
+    state.proceduralArenaKeys.has(k) ||
+    state.proceduralRouletteKeys.has(k) ||
+    state.proceduralSurgeKeys.has(k) ||
+    (escapeLocalDevHost && state.testWestQ === q && state.testWestR === r)
+  ) {
+    return;
+  }
+  const activeProceduralSpecials =
+    state.proceduralArenaKeys.size + state.proceduralRouletteKeys.size + state.proceduralSurgeKeys.size;
+  if (activeProceduralSpecials >= 1) return;
+  if (Math.random() >= SPECIAL_HEX_POOL_WEIGHT) return;
+  state.proceduralArenaSpentKeys.delete(k);
+  state.proceduralRouletteSpentKeys.delete(k);
+  state.proceduralSurgeSpentKeys.delete(k);
+  const roll = Math.random();
+  const kind = roll < 1 / 3 ? "arena" : roll < 2 / 3 ? "roulette" : "surge";
+  if (kind === "arena") state.proceduralArenaKeys.add(k);
+  else if (kind === "roulette") state.proceduralRouletteKeys.add(k);
+  else state.proceduralSurgeKeys.add(k);
   state.proceduralSpecialCooldownTiles = PROCEDURAL_SPECIAL_COOLDOWN_TILES;
+  runLog.event(LogCodes.EVT_PROCEDURAL_SPECIAL_HEX, "Procedural special tile placed", { q, r, kind });
 }
 
 /** World point lies on the active roulette hex (axial cell + circumradius guard). */
@@ -431,28 +886,36 @@ function isWorldPointOnRouletteHexTile(x, y) {
 
 function isWorldPointOnSpecialLootForbiddenHex(x, y) {
   const h = worldToHex(x, y);
-  return isArenaNexusTile(h.q, h.r) || isRouletteHexTile(h.q, h.r);
+  return isArenaNexusTile(h.q, h.r) || isRouletteHexTile(h.q, h.r) || isSurgeHexTile(h.q, h.r);
 }
 
-function strokePointyHexOutline(ctx, cx, cy, vertexRadius, strokeStyle, lineWidth, glowBlur) {
-  ctx.save();
-  ctx.shadowColor = strokeStyle;
-  ctx.shadowBlur = glowBlur;
-  ctx.strokeStyle = strokeStyle;
-  ctx.lineWidth = lineWidth;
-  ctx.beginPath();
-  for (let i = 0; i < 6; i++) {
-    const a = -Math.PI / 2 + (Math.PI / 3) * i;
-    const x = cx + Math.cos(a) * vertexRadius;
-    const y = cy + Math.sin(a) * vertexRadius;
-    if (i === 0) ctx.moveTo(x, y);
-    else ctx.lineTo(x, y);
+/** Ground/air spawners must not sit on special-hex footprint (roulette uses circumhex guard). */
+function isWorldPointOnSpecialSpawnerForbiddenHex(x, y) {
+  if (isWorldPointOnRouletteHexTile(x, y)) return true;
+  const h = worldToHex(x, y);
+  if (!isArenaNexusTile(h.q, h.r) && !isSurgeHexTile(h.q, h.r)) return false;
+  const c = hexToWorld(h.q, h.r);
+  return Math.hypot(x - c.x, y - c.y) <= HEX_SIZE + 4;
+}
+
+function ejectSpawnerHunterFromSpecialHexFootprint(h) {
+  if (h.type !== "spawner" && h.type !== "airSpawner") return;
+  if (!isWorldPointOnSpecialSpawnerForbiddenHex(h.x, h.y)) return;
+  const hq = worldToHex(h.x, h.y);
+  const c = hexToWorld(hq.q, hq.r);
+  const pad = 8;
+  const targetR = HEX_SIZE + h.r + pad;
+  const dx = h.x - c.x;
+  const dy = h.y - c.y;
+  let d = Math.hypot(dx, dy);
+  if (d < 1e-3) {
+    const ang = Math.random() * TAU;
+    h.x = c.x + Math.cos(ang) * targetR;
+    h.y = c.y + Math.sin(ang) * targetR;
+    return;
   }
-  ctx.closePath();
-  ctx.stroke();
-  ctx.shadowBlur = 0;
-  ctx.stroke();
-  ctx.restore();
+  h.x = c.x + (dx / d) * targetR;
+  h.y = c.y + (dy / d) * targetR;
 }
 
 function cleanupArenaNexusSiegeCombat() {
@@ -487,7 +950,6 @@ function ejectHuntersFromArenaNexusDuringSiege() {
   const edgeR = HEX_SIZE + 14;
   for (const h of entities.hunters) {
     if (h.arenaNexusSpawn) continue;
-    if (h.type === "spawner" || h.type === "airSpawner") continue;
     const hq = worldToHex(h.x, h.y);
     if (!isArenaNexusTile(hq.q, hq.r)) continue;
     const dx = h.x - cx;
@@ -549,6 +1011,7 @@ function finishArenaNexusSiege() {
   state.arenaPhase = 2;
   cleanupArenaNexusSiegeCombat();
   state.arenaCardRewardAt = state.elapsed + ARENA_NEXUS_REWARD_MODAL_DELAY_SEC;
+  markProceduralArenaHexSpent(state.arenaSiegeQ, state.arenaSiegeR);
 }
 
 function updateArenaNexus(_dt) {
@@ -577,7 +1040,7 @@ function updateArenaNexus(_dt) {
 
   if (state.arenaPhase !== 0) return;
   const ph = worldToHex(player.x, player.y);
-  if (!isArenaNexusTile(ph.q, ph.r)) return;
+  if (!isArenaNexusInteractive(ph.q, ph.r)) return;
   const c = hexToWorld(ph.q, ph.r);
   const dist = Math.hypot(player.x - c.x, player.y - c.y);
   if (dist <= ARENA_NEXUS_INNER_ENTER_R) beginArenaNexusSiege();
@@ -599,8 +1062,14 @@ function drawArenaNexusWorld(ctx) {
     const c = hexToWorld(q, r);
     const cx = c.x;
     const cy = c.y;
-    strokePointyHexOutline(ctx, cx, cy, HEX_SIZE, outerColor, 3.2, 18);
-    strokePointyHexOutline(ctx, cx, cy, HEX_SIZE * ARENA_NEXUS_INNER_HEX_SCALE, innerColor, 2.4, 14);
+    let cellOuter = outerColor;
+    let cellInner = innerColor;
+    if (state.proceduralArenaSpentKeys.has(hexKey(q, r))) {
+      cellOuter = "rgba(34, 197, 94, 0.92)";
+      cellInner = "rgba(74, 222, 128, 0.88)";
+    }
+    strokePointyHexOutline(ctx, cx, cy, HEX_SIZE, cellOuter, 3.2, 18);
+    strokePointyHexOutline(ctx, cx, cy, HEX_SIZE * ARENA_NEXUS_INNER_HEX_SCALE, cellInner, 2.4, 14);
 
     if (state.arenaPhase === 1 && q === state.arenaSiegeQ && r === state.arenaSiegeR) {
       const rem = Math.max(0, state.arenaSiegeEndAt - state.elapsed);
@@ -628,7 +1097,6 @@ function ejectHuntersFromRouletteHexLock() {
   const edgeR = HEX_SIZE + 14;
   for (const h of entities.hunters) {
     if (h.arenaNexusSpawn) continue;
-    if (h.type === "spawner" || h.type === "airSpawner") continue;
     const hq = worldToHex(h.x, h.y);
     if (!isRouletteHexTile(hq.q, hq.r)) continue;
     const { x: cx, y: cy } = hexToWorld(hq.q, hq.r);
@@ -643,6 +1111,7 @@ function ejectHuntersFromRouletteHexLock() {
 function ejectHuntersFromLockedSpecialHexes() {
   ejectHuntersFromArenaNexusDuringSiege();
   ejectHuntersFromRouletteHexLock();
+  ejectHuntersFromSurgeLockHex();
 }
 
 function triggerRouletteHexOuterCrossing() {
@@ -651,34 +1120,6 @@ function triggerRouletteHexOuterCrossing() {
   triggerUltScreenShake(14, 0.22);
   damagePlayer(2, { rouletteHexOuterPenalty: true });
   ejectHuntersFromRouletteHexLock();
-}
-
-function fillPointyHexRainbowGlow(ctx, cx, cy, vertexRadius) {
-  ctx.save();
-  ctx.beginPath();
-  for (let i = 0; i < 6; i++) {
-    const a = -Math.PI / 2 + (Math.PI / 3) * i;
-    const x = cx + Math.cos(a) * vertexRadius;
-    const y = cy + Math.sin(a) * vertexRadius;
-    if (i === 0) ctx.moveTo(x, y);
-    else ctx.lineTo(x, y);
-  }
-  ctx.closePath();
-  const spin = state.elapsed * 2.8;
-  if (typeof ctx.createConicGradient === "function") {
-    const g = ctx.createConicGradient(spin, cx, cy);
-    for (let k = 0; k <= 7; k++) g.addColorStop(k / 7, `hsl(${(k / 7) * 360} 92% 58%)`);
-    ctx.fillStyle = g;
-  } else {
-    ctx.fillStyle = `hsla(${(state.elapsed * 110) % 360}, 92%, 58%, 0.55)`;
-  }
-  ctx.globalAlpha = 0.52;
-  ctx.fill();
-  ctx.globalAlpha = 1;
-  ctx.strokeStyle = "rgba(255,255,255,0.35)";
-  ctx.lineWidth = 1.5;
-  ctx.stroke();
-  ctx.restore();
 }
 
 function drawRouletteHexWorld(ctx) {
@@ -691,8 +1132,10 @@ function drawRouletteHexWorld(ctx) {
     const c = hexToWorld(q, r);
     const cx = c.x;
     const cy = c.y;
-    strokePointyHexOutline(ctx, cx, cy, HEX_SIZE, outerColor, 3.2, 18);
-    fillPointyHexRainbowGlow(ctx, cx, cy, ROULETTE_INNER_HEX_DRAW_R);
+    let cellOuter = outerColor;
+    if (state.proceduralRouletteSpentKeys.has(hexKey(q, r))) cellOuter = "rgba(34, 197, 94, 0.92)";
+    strokePointyHexOutline(ctx, cx, cy, HEX_SIZE, cellOuter, 3.2, 18);
+    fillPointyHexRainbowGlow(ctx, cx, cy, ROULETTE_INNER_HEX_DRAW_R, state.elapsed);
   }
 }
 
@@ -753,6 +1196,7 @@ function pinPlayerDeckPanelForRouletteModal() {
 }
 
 function closeRouletteForgeUi() {
+  runLog.event(LogCodes.EVT_ROULETTE_MODAL_CLOSE, "Roulette forge modal closed");
   if (rouletteModal) rouletteModal.hidden = true;
   unpinPlayerDeckPanelForRouletteModal();
   state.pausedForRoulette = false;
@@ -780,6 +1224,12 @@ function finishRouletteForgeSuccess(chosen) {
   else if (ref.kind === "bp") inventory.backpackSlots[ref.idx] = placed;
   state.rouletteForgeComplete = true;
   state.roulettePhase = 2;
+  runLog.event(LogCodes.EVT_ROULETTE_FORGE_SUCCESS, "Roulette forge completed; card kept", {
+    ref,
+    chosenSuit: chosen?.suit,
+    chosenRank: chosen?.rank,
+  });
+  markProceduralRouletteHexSpent(state.rouletteLockQ, state.rouletteLockR);
   closeRouletteForgeUi();
   recalcCardPassives();
 }
@@ -909,6 +1359,11 @@ function renderRoulettePickWinnerButtons() {
 function startRouletteSpinFromSourceCard(sourceCard, ref) {
   const pair = buildRoulettePairFromSource(sourceCard);
   if (!pair) {
+    runLog.warn(LogCodes.E_ROULETTE_NO_FORGE_PAIR, "Could not build roulette forge pair for selected card.", {
+      suit: sourceCard?.suit,
+      rank: sourceCard?.rank,
+      ref,
+    });
     if (rouletteModalSub) {
       rouletteModalSub.textContent =
         "That card has no two free suits at this rank (other ranks may still work). Pick another or cancel.";
@@ -977,6 +1432,7 @@ function renderRouletteSourcePicker() {
 
 function openRouletteForgeModal() {
   if (!rouletteModal || state.rouletteForgeComplete) return;
+  runLog.event(LogCodes.EVT_ROULETTE_MODAL_OPEN, "Roulette forge modal opened");
   state.pausedForRoulette = true;
   state.inventoryModalOpen = true;
   state.rouletteStep = "pickSource";
@@ -1024,11 +1480,24 @@ function updateRouletteHex(_dt) {
   const dist = Math.hypot(player.x - rc.x, player.y - rc.y);
   const inInner = dist <= ROULETTE_INNER_HIT_R;
   const enteredHexThisFrame = inHex && !state.rouletteWasInHex;
-  if (enteredHexThisFrame && state.roulettePhase === 0) {
+  if (
+    enteredHexThisFrame &&
+    state.roulettePhase === 0 &&
+    isRouletteHexInteractive(ph.q, ph.r)
+  ) {
+    state.rouletteLockQ = ph.q;
+    state.rouletteLockR = ph.r;
     triggerRouletteHexOuterCrossing();
   }
   state.rouletteWasInHex = true;
-  if (state.roulettePhase === 1 && inInner && !state.rouletteForgeComplete && !state.rouletteInnerExitLatch) {
+  if (
+    state.roulettePhase === 1 &&
+    ph.q === state.rouletteLockQ &&
+    ph.r === state.rouletteLockR &&
+    inInner &&
+    !state.rouletteForgeComplete &&
+    !state.rouletteInnerExitLatch
+  ) {
     state.rouletteInnerExitLatch = true;
     openRouletteForgeModal();
   }
@@ -1112,10 +1581,17 @@ const state = {
   rogueNextFoodAt: 0,
   rogueNextHungryPopupAt: 0,
   rogueLastKnownPlayerPos: { x: 96, y: 340 },
-  /** Procedural arena hexes (`hexKey` → Set); unbounded count, 1/15 + cooldown between new spawns. */
+  /** Procedural arena hexes (`hexKey` → Set); at most one active special across arena/roulette/surge; 1/20 + 15-tile cooldown. */
   proceduralArenaKeys: new Set(),
   proceduralRouletteKeys: new Set(),
-  /** Newly generated tiles to skip before the next 1/15 special roll (after a spawn, starts at 10). */
+  proceduralSurgeKeys: new Set(),
+  proceduralArenaSpentKeys: new Set(),
+  proceduralRouletteSpentKeys: new Set(),
+  proceduralSurgeSpentKeys: new Set(),
+  /** Axial cell where the current roulette outer-lock session is anchored (set on outer crossing). */
+  rouletteLockQ: 0,
+  rouletteLockR: 0,
+  /** Newly generated tiles to skip before the next 1/20 special roll (after a spawn, starts at 15). */
   proceduralSpecialCooldownTiles: 0,
   /** 0 = idle (blue), 1 = siege (red), 2 = cleared (green). */
   arenaPhase: 0,
@@ -1130,7 +1606,7 @@ const state = {
   /** Local-dev west neighbor for `#special-test-west-select` (additive with procedural specials). */
   testWestQ: 0,
   testWestR: 0,
-  /** @type {"none"|"arena"|"roulette"} */
+  /** @type {"none"|"arena"|"roulette"|"surge"} */
   testWestKind: "none",
   /** 0 idle blue, 1 locked after outer penalty, 2 cleared after forge. */
   roulettePhase: 0,
@@ -1147,6 +1623,27 @@ const state = {
   rouletteOptionB: null,
   rouletteSpinShuffleUntil: 0,
   rouletteSpinRevealAt: 0,
+  /** 0 idle; 1 outer lock; 2 gauntlet; 3 inner green + unlocked, outer locked; 4 fully cleared until leave. */
+  surgePhase: 0,
+  surgeLockQ: 0,
+  surgeLockR: 0,
+  surgeWave: 1,
+  /** @type {"travel"|"pause"|"idle"} */
+  surgeAwait: "travel",
+  surgeTravelStartAt: 0,
+  surgeTravelDur: SURGE_TRAVEL_DUR_FIRST,
+  surgePauseEndAt: 0,
+  surgeSafeX: 0,
+  surgeSafeY: 0,
+  surgePrevSafeX: 0,
+  surgePrevSafeY: 0,
+  surgeHasPrevSafeBubble: false,
+  /** After gauntlet: set true until player exits inner reward ring (then Joker timer starts). */
+  surgeEligibleForInnerExitReward: false,
+  /** Like arena: `elapsed` when to open Joker modal after inner exit; 0 = none. */
+  surgeCardRewardAt: 0,
+  surgeWasInSurgeHex: false,
+  surgeScreenFlashUntil: 0,
 };
 
 let snapshotDirectoryHandle = null;
@@ -2176,6 +2673,7 @@ function swapCardsBetweenZones(fromZoneId, toZoneId) {
 }
 
 function closeCardModal() {
+  runLog.event(LogCodes.EVT_CARD_MODAL_CLOSE, "Card / inventory modal closed");
   state.inventoryModalOpen = false;
   state.pendingCard = null;
   state.cardPickupFlowActive = false;
@@ -2188,6 +2686,7 @@ function closeCardModal() {
 
 function continueAfterLoadout() {
   // Any unplaced pickup is discarded when continuing.
+  runLog.event(LogCodes.EVT_CARD_LOADOUT_CONTINUE, "Player continued after card / loadout modal");
   state.pendingCard = null;
   closeCardModal();
 }
@@ -2334,6 +2833,9 @@ function getLaserEndpoint(x, y, dx, dy, maxLen = 900, opts = {}) {
     if (hasAnyRouletteHexSite() && isWorldPointOnRouletteHexTile(px, py)) {
       return { x: lastX, y: lastY };
     }
+    if (isWorldPointOnSurgeLockBarrierTile(px, py)) {
+      return { x: lastX, y: lastY };
+    }
     if (!throughObstacles) {
       for (const obstacle of obstacles) {
         if (px >= obstacle.x && px <= obstacle.x + obstacle.w && py >= obstacle.y && py <= obstacle.y + obstacle.h) {
@@ -2349,6 +2851,13 @@ function getLaserEndpoint(x, y, dx, dy, maxLen = 900, opts = {}) {
 
 /** Sniper shelling: skip entirely if aim or the shot line would pass through the roulette hex. */
 function sniperArtillerySuppressedByRoulette(sniperX, sniperY, aimX, aimY) {
+  if (isWorldPointOnSurgeLockBarrierTile(aimX, aimY)) return true;
+  for (let s = 0; s <= 28; s++) {
+    const u = s / 28;
+    const sx = sniperX + (aimX - sniperX) * u;
+    const sy = sniperY + (aimY - sniperY) * u;
+    if (isWorldPointOnSurgeLockBarrierTile(sx, sy)) return true;
+  }
   if (!hasAnyRouletteHexSite()) return false;
   if (isWorldPointOnRouletteHexTile(aimX, aimY)) return true;
   for (let s = 0; s <= 28; s++) {
@@ -2419,12 +2928,14 @@ function spawnLootPointClear(candidate) {
 /** Heals / cards: mix ring-around-player (readable spread) with hex-local picks. */
 function randomOpenPoint(radius, attempts = 96, opts = {}) {
   const excludeArenaNexus = !!opts.excludeArenaNexus;
+  const excludeSpecialSpawnerHex = !!opts.excludeSpecialSpawnerHex;
   const dMin = 96 + radius;
   const dMax = Math.min(VIEW_W, VIEW_H) * 0.66;
   const sourceHexes = activeHexes.length ? activeHexes : [{ q: 0, r: 0 }];
 
   function lootPointUsable(candidate) {
     if (excludeArenaNexus && isWorldPointOnSpecialLootForbiddenHex(candidate.x, candidate.y)) return false;
+    if (excludeSpecialSpawnerHex && isWorldPointOnSpecialSpawnerForbiddenHex(candidate.x, candidate.y)) return false;
     return spawnLootPointClear(candidate);
   }
 
@@ -2454,26 +2965,31 @@ function randomOpenPoint(radius, attempts = 96, opts = {}) {
     const d = rand(dMin, dMax * 0.92);
     const candidate = { x: player.x + Math.cos(ang) * d, y: player.y + Math.sin(ang) * d, r: radius };
     if (excludeArenaNexus && isWorldPointOnSpecialLootForbiddenHex(candidate.x, candidate.y)) continue;
+    if (excludeSpecialSpawnerHex && isWorldPointOnSpecialSpawnerForbiddenHex(candidate.x, candidate.y)) continue;
     if (!collidesAnyObstacle(candidate)) return candidate;
   }
   for (let k = 0; k < 24; k++) {
     const candidate = { x: player.x + rand(-280, 280), y: player.y + rand(-280, 280), r: radius };
     if (excludeArenaNexus && isWorldPointOnSpecialLootForbiddenHex(candidate.x, candidate.y)) continue;
+    if (excludeSpecialSpawnerHex && isWorldPointOnSpecialSpawnerForbiddenHex(candidate.x, candidate.y)) continue;
     if (!collidesAnyObstacle(candidate)) return candidate;
   }
   for (let f = 0; f < 32; f++) {
     const p = { x: player.x + rand(-140, 140), y: player.y + rand(-140, 140), r: radius };
     if (excludeArenaNexus && isWorldPointOnSpecialLootForbiddenHex(p.x, p.y)) continue;
+    if (excludeSpecialSpawnerHex && isWorldPointOnSpecialSpawnerForbiddenHex(p.x, p.y)) continue;
     return p;
   }
   return { x: player.x + rand(-100, 100), y: player.y + rand(-100, 100), r: radius };
 }
 
-function randomOpenPointAround(cx, cy, radiusMin, radiusMax, r, attempts = 40) {
+function randomOpenPointAround(cx, cy, radiusMin, radiusMax, r, attempts = 40, opts = {}) {
+  const excludeSpecialHex = !!opts.excludeSpecialHex;
   for (let i = 0; i < attempts; i++) {
     const ang = Math.random() * TAU;
     const d = rand(radiusMin, radiusMax);
     const candidate = { x: cx + Math.cos(ang) * d, y: cy + Math.sin(ang) * d, r };
+    if (excludeSpecialHex && isWorldPointOnSpecialSpawnerForbiddenHex(candidate.x, candidate.y)) continue;
     if (outOfBoundsCircle(candidate)) continue;
     if (!collidesAnyObstacle(candidate)) return candidate;
   }
@@ -2488,7 +3004,13 @@ function randomOpenPointAround(cx, cy, radiusMin, radiusMax, r, attempts = 40) {
 /** Nearest non-obstacle point for a small hunter (e.g. air-spawner swarm) from a preferred center. */
 function nearestLegalPointForSmallHunter(cx, cy, r) {
   const center = { x: cx, y: cy, r };
-  if (!collidesAnyObstacle(center) && !outOfBoundsCircle(center)) return center;
+  if (
+    !collidesAnyObstacle(center) &&
+    !outOfBoundsCircle(center) &&
+    !isWorldPointOnSpecialSpawnerForbiddenHex(center.x, center.y)
+  ) {
+    return center;
+  }
   const STEP = 5;
   const ANGLES = 32;
   const MAX_R = 260;
@@ -2496,14 +3018,20 @@ function nearestLegalPointForSmallHunter(cx, cy, r) {
     for (let i = 0; i < ANGLES; i++) {
       const ang = (i / ANGLES) * TAU;
       const cand = { x: cx + Math.cos(ang) * rad, y: cy + Math.sin(ang) * rad, r };
-      if (!outOfBoundsCircle(cand) && !collidesAnyObstacle(cand)) return cand;
+      if (
+        !outOfBoundsCircle(cand) &&
+        !collidesAnyObstacle(cand) &&
+        !isWorldPointOnSpecialSpawnerForbiddenHex(cand.x, cand.y)
+      ) {
+        return cand;
+      }
     }
   }
-  return randomOpenPoint(r);
+  return randomOpenPoint(r, 96, { excludeSpecialSpawnerHex: true });
 }
 
 function resolveFastSpawnNearAirSpawner(h, fastR) {
-  const ideal = randomOpenPointAround(h.x, h.y, h.r + 12, h.r + 40, fastR, 56);
+  const ideal = randomOpenPointAround(h.x, h.y, h.r + 12, h.r + 40, fastR, 56, { excludeSpecialHex: true });
   return nearestLegalPointForSmallHunter(ideal.x, ideal.y, fastR);
 }
 
@@ -2529,6 +3057,7 @@ function refreshControlsHint() {
 }
 
 function startGameWithCharacter(id) {
+  runLog.event(LogCodes.EVT_GAME_START, "Run started with character", { characterId: id });
   selectCharacter(id);
   gameStarted = true;
   syncSpecialTestWestPanelLock();
@@ -2596,6 +3125,7 @@ function wireCharacterSelect() {
   }
 
   function showHowToPlay() {
+    runLog.event(LogCodes.EVT_CHARACTER_HOWTO_OPEN, "Character select: opened How to play");
     if (flowPickEl) flowPickEl.hidden = true;
     if (howtoPanelEl) howtoPanelEl.hidden = false;
     if (confirm) confirm.hidden = true;
@@ -2624,15 +3154,24 @@ function wireCharacterSelect() {
     showPick();
     for (const btn of characterSelectOptions) {
       btn.addEventListener("click", () => {
-        showConfirm(btn.dataset.characterId || "knight");
+        const id = btn.dataset.characterId || "knight";
+        runLog.event(LogCodes.EVT_CHARACTER_SELECTED, "Character select: chose hero", { characterId: id });
+        showConfirm(id);
       });
     }
     confirmBtn.addEventListener("click", () => {
-      if (pendingCharacterId) startGameWithCharacter(pendingCharacterId);
+      if (pendingCharacterId) {
+        runLog.event(LogCodes.EVT_CHARACTER_CONFIRM, "Character select: confirmed", { characterId: pendingCharacterId });
+        startGameWithCharacter(pendingCharacterId);
+      }
     });
     backBtn.addEventListener("click", showPick);
     if (howtoOpenBtn) howtoOpenBtn.addEventListener("click", showHowToPlay);
-    if (howtoBackBtn) howtoBackBtn.addEventListener("click", showPick);
+    if (howtoBackBtn)
+      howtoBackBtn.addEventListener("click", () => {
+        runLog.event(LogCodes.EVT_CHARACTER_HOWTO_BACK, "Character select: back from How to play");
+        showPick();
+      });
     afterDeathRetry = () => {
       showPick();
       characterSelectModal.classList.add("open");
@@ -2641,7 +3180,9 @@ function wireCharacterSelect() {
   } else {
     for (const btn of characterSelectOptions) {
       btn.addEventListener("click", () => {
-        startGameWithCharacter(btn.dataset.characterId || "knight");
+        const id = btn.dataset.characterId || "knight";
+        runLog.event(LogCodes.EVT_CHARACTER_SELECTED, "Character select: quick start (no confirm UI)", { characterId: id });
+        startGameWithCharacter(id);
       });
     }
     afterDeathRetry = () => {
@@ -3060,6 +3601,7 @@ function makeSnapshotBlob() {
 async function chooseSnapshotFolder() {
   if (!deathSnapshotsEnabled) return;
   if (!window.showDirectoryPicker) {
+    runLog.warn(LogCodes.E_SNAPSHOT_API, "showDirectoryPicker unavailable; snapshots use download fallback only.");
     setSnapshotStatus("Death screenshots: browser folder access unavailable, using downloads");
     return;
   }
@@ -3067,47 +3609,60 @@ async function chooseSnapshotFolder() {
     snapshotDirectoryHandle = await window.showDirectoryPicker({ mode: "readwrite" });
     setSnapshotStatus("Death screenshots: saving to chosen folder");
   } catch (error) {
+    runLog.fail(LogCodes.E_SNAPSHOT_FOLDER, "User cancelled or could not open snapshot folder picker.", error);
     setSnapshotStatus("Death screenshots: folder not chosen, using downloads");
   }
 }
 
 async function saveDeathSnapshot() {
   if (!deathSnapshotsEnabled) return;
-  const blob = await makeSnapshotBlob();
-  if (!blob) return;
-
-  const filename = makeSnapshotFilename();
-  const shortName = filename.split("/").pop();
-
-  if (snapshotDirectoryHandle) {
-    try {
-      let targetDir = snapshotDirectoryHandle;
-      try {
-        targetDir = await snapshotDirectoryHandle.getDirectoryHandle("death-snapshots", { create: true });
-      } catch (error) {
-        targetDir = snapshotDirectoryHandle;
-      }
-      const fileHandle = await targetDir.getFileHandle(shortName, { create: true });
-      const writable = await fileHandle.createWritable();
-      await writable.write(blob);
-      await writable.close();
-      setSnapshotStatus(`Death screenshots: saved ${shortName}`);
+  try {
+    const blob = await makeSnapshotBlob();
+    if (!blob) {
+      runLog.fail(LogCodes.E_SNAPSHOT_BLOB, "canvas.toBlob returned null; death screenshot skipped.", null);
       return;
-    } catch (error) {
-      setSnapshotStatus("Death screenshots: folder save failed, using downloads");
-      snapshotDirectoryHandle = null;
     }
-  }
 
-  const url = URL.createObjectURL(blob);
-  const link = document.createElement("a");
-  link.href = url;
-  link.download = shortName;
-  document.body.appendChild(link);
-  link.click();
-  link.remove();
-  setTimeout(() => URL.revokeObjectURL(url), 1000);
-  setSnapshotStatus(`Death screenshots: downloaded ${shortName}`);
+    const filename = makeSnapshotFilename();
+    const shortName = filename.split("/").pop();
+
+    if (snapshotDirectoryHandle) {
+      try {
+        let targetDir = snapshotDirectoryHandle;
+        try {
+          targetDir = await snapshotDirectoryHandle.getDirectoryHandle("death-snapshots", { create: true });
+        } catch (error) {
+          runLog.warn(LogCodes.E_SNAPSHOT_SAVE, "Could not create death-snapshots subfolder; saving to picker root.", {
+            message: error instanceof Error ? error.message : String(error),
+          });
+          targetDir = snapshotDirectoryHandle;
+        }
+        const fileHandle = await targetDir.getFileHandle(shortName, { create: true });
+        const writable = await fileHandle.createWritable();
+        await writable.write(blob);
+        await writable.close();
+        setSnapshotStatus(`Death screenshots: saved ${shortName}`);
+        return;
+      } catch (error) {
+        runLog.fail(LogCodes.E_SNAPSHOT_SAVE, "Writing death snapshot to chosen folder failed; falling back to download.", error);
+        setSnapshotStatus("Death screenshots: folder save failed, using downloads");
+        snapshotDirectoryHandle = null;
+      }
+    }
+
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = shortName;
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+    setSnapshotStatus(`Death screenshots: downloaded ${shortName}`);
+  } catch (error) {
+    runLog.fail(LogCodes.E_SNAPSHOT_SAVE, "Unexpected failure while saving death snapshot.", error);
+    setSnapshotStatus("Death screenshots: save failed");
+  }
 }
 
 function spawnHunter(type, customX, customY, opts) {
@@ -3208,14 +3763,42 @@ function spawnHunter(type, customX, customY, opts) {
   if (customX != null && customY != null) {
     h.x = customX;
     h.y = customY;
+    if (type === "spawner" || type === "airSpawner") {
+      for (let attempt = 0; attempt < 56; attempt++) {
+        ejectSpawnerHunterFromSpecialHexFootprint(h);
+        const circ = { x: h.x, y: h.y, r: h.r };
+        if (!isWorldPointOnSpecialSpawnerForbiddenHex(h.x, h.y) && !collidesAnyObstacle(circ)) break;
+        const a = Math.random() * TAU;
+        const dist = rand(300, 780);
+        h.x = player.x + Math.cos(a) * dist;
+        h.y = player.y + Math.sin(a) * dist;
+      }
+    }
     entities.hunters.push(h);
     return;
+  }
+
+  if (type === "spawner" || type === "airSpawner") {
+    for (let attempt = 0; attempt < 64; attempt++) {
+      const ang = Math.random() * TAU;
+      const d = rand(320, 760);
+      h.x = player.x + Math.cos(ang) * d;
+      h.y = player.y + Math.sin(ang) * d;
+      if (isWorldPointOnSpecialSpawnerForbiddenHex(h.x, h.y)) continue;
+      const circ = { x: h.x, y: h.y, r: h.r };
+      if (collidesAnyObstacle(circ)) continue;
+      entities.hunters.push(h);
+      return;
+    }
   }
 
   const ang = Math.random() * TAU;
   const d = rand(320, 760);
   h.x = player.x + Math.cos(ang) * d;
   h.y = player.y + Math.sin(ang) * d;
+  if (type === "spawner" || type === "airSpawner") {
+    ejectSpawnerHunterFromSpecialHexFootprint(h);
+  }
   entities.hunters.push(h);
 }
 
@@ -3386,6 +3969,11 @@ function updateRogueNeeds(simDt, moving, touchedObstacle) {
         state.rogueHungerMax,
         Math.max(state.rogueHunger, f.nutrition ?? ROGUE_FOOD_HUNGER_RESTORE)
       );
+      runLog.event(LogCodes.EVT_ROGUE_FOOD_EATEN, "Rogue ate food pickup", {
+        hungerAfter: state.rogueHunger,
+        hungerMax: state.rogueHungerMax,
+        nutrition: f.nutrition ?? ROGUE_FOOD_HUNGER_RESTORE,
+      });
       spawnHealPopup(player.x, player.y - player.r - 8, "Fed", "#fcd34d");
       entities.foods.splice(i, 1);
     }
@@ -3462,6 +4050,10 @@ function openCardPickupModal(card) {
   state.cardPickupFlowActive = true;
   state.pickupTargetRank = card.rank;
   state.keys.clear();
+  runLog.event(LogCodes.EVT_CARD_MODAL_OPEN, "Card pickup / inventory modal opened", {
+    suit: card?.suit,
+    rank: card?.rank,
+  });
   renderCardModal();
 }
 
@@ -3504,6 +4096,7 @@ function tryDash() {
     player.x = target.x;
     player.y = target.y;
     clampPlayerToArenaNexusInnerHex();
+    clampPlayerToSurgeLockHex();
     if (selectedCharacter.id === "rogue" && spadesCount >= SET_BONUS_SUIT_THRESHOLD && qualifiesForSpadesDashBonus) {
       // Spades set bonus: actually re-enter stealth so patrol AI / HUD / contact rules match "stealth landing".
       state.rogueStealthActive = true;
@@ -3555,6 +4148,16 @@ function computeDashTarget() {
       const { x: acx, y: acy } = arenaNexusWorldCenter();
       const maxC = arenaNexusSiegeInnerMaxCenterDistPx();
       if (Math.hypot(test.x - acx, test.y - acy) > maxC + 1e-4) break;
+    }
+    if (state.surgePhase === 1 || state.surgePhase === 2 || state.surgePhase === 3) {
+      const hq = worldToHex(test.x, test.y);
+      if (hq.q !== state.surgeLockQ || hq.r !== state.surgeLockR) break;
+      const tc = hexToWorld(state.surgeLockQ, state.surgeLockR);
+      const maxS =
+        state.surgePhase === 1 || state.surgePhase === 3
+          ? surgeOuterWaitingMaxCenterDistPx()
+          : surgeLockTileMaxCenterDistPx();
+      if (Math.hypot(test.x - tc.x, test.y - tc.y) > maxS + 1e-4) break;
     }
     if (collidesAnyObstacle(test)) {
       if (selectedCharacter.id === "rogue") break;
@@ -3844,6 +4447,7 @@ function moveHunters(dt) {
       h.dir.x /= alen;
       h.dir.y /= alen;
       moveCircleWithCollisions(h, h.dir.x * airSpeed, h.dir.y * airSpeed, spDt, { ignoreObstacles: true });
+      ejectSpawnerHunterFromSpecialHexFootprint(h);
       continue;
     }
 
@@ -4064,17 +4668,17 @@ function updateRangedAttackers(dt) {
     const prevY = p.y;
     p.x += p.vx * dt * sp;
     p.y += p.vy * dt * sp;
-    let hitRoulette = false;
+    let hitSpecialBarrier = false;
     for (let s = 0; s <= 5; s++) {
       const u = s / 5;
       const sx = prevX + (p.x - prevX) * u;
       const sy = prevY + (p.y - prevY) * u;
-      if (isWorldPointOnRouletteHexTile(sx, sy)) {
-        hitRoulette = true;
+      if (isWorldPointOnRouletteHexTile(sx, sy) || isWorldPointOnSurgeLockBarrierTile(sx, sy)) {
+        hitSpecialBarrier = true;
         break;
       }
     }
-    if (hitRoulette) {
+    if (hitSpecialBarrier) {
       spawnAttackRing(p.x, p.y, p.r + 9, "#94a3b8", 0.1);
       entities.projectiles.splice(i, 1);
       continue;
@@ -4103,6 +4707,9 @@ function updateRangedAttackers(dt) {
 
 function updateSpawners(dt) {
   for (const h of entities.hunters) {
+    if (h.type === "spawner" || h.type === "airSpawner") ejectSpawnerHunterFromSpecialHexFootprint(h);
+  }
+  for (const h of entities.hunters) {
     if (h.type !== "spawner" && h.type !== "airSpawner") continue;
     if (state.elapsed < h.spawnDelayUntil) continue;
     if (state.elapsed >= h.spawnActiveUntil) continue;
@@ -4122,7 +4729,7 @@ function updateSpawners(dt) {
         const open =
           h.type === "airSpawner"
             ? resolveFastSpawnNearAirSpawner(h, fastR)
-            : randomOpenPointAround(h.x, h.y, h.r + 16, h.r + 34, fastR, 25);
+            : randomOpenPointAround(h.x, h.y, h.r + 16, h.r + 34, fastR, 25, { excludeSpecialHex: true });
         spawnHunter("fast", open.x, open.y);
       }
     }
@@ -4271,17 +4878,17 @@ function updateSnipers(dt) {
       continue;
     }
     const life = clamp((state.elapsed - b.bornAt) / b.life, 0, 1);
-    let hitRoulette = false;
+    let hitSpecialBarrier = false;
     for (let s = 0; s <= 16; s++) {
       const u = s / 16;
       const sx = b.x + (b.tx - b.x) * u;
       const sy = b.y + (b.ty - b.y) * u;
-      if (isWorldPointOnRouletteHexTile(sx, sy)) {
-        hitRoulette = true;
+      if (isWorldPointOnRouletteHexTile(sx, sy) || isWorldPointOnSurgeLockBarrierTile(sx, sy)) {
+        hitSpecialBarrier = true;
         break;
       }
     }
-    if (hitRoulette) {
+    if (hitSpecialBarrier) {
       const x = b.x + (b.tx - b.x) * life;
       const y = b.y + (b.ty - b.y) * life;
       spawnAttackRing(x, y, 10, "#94a3b8", 0.1);
@@ -4337,6 +4944,7 @@ function updateCollisions() {
     if (distSq(p, player) <= rr * rr) {
       clearTempHp();
       player.hp = Math.min(player.maxHp, player.hp + p.heal);
+      runLog.event(LogCodes.EVT_HEAL_PICKUP, "Picked up heal cross", { heal: p.heal, hpAfter: player.hp, maxHp: player.maxHp });
       // Heal pickup slightly refreshes ability cooldowns.
       const refreshFactor = 0.8; // 20% shorter remaining cooldown
       for (const ability of [abilities.dash, abilities.burst, abilities.decoy]) {
@@ -4626,6 +5234,7 @@ function update(dt) {
     ejectPlayerFromObstaclesIfStuck();
   }
   clampPlayerToArenaNexusInnerHex();
+  clampPlayerToSurgeLockHex();
   if (moving && moveRes.touchedObstacle && passive.obstacleTouchMult > 1) {
     inventory.spadesObstacleBoostUntil = state.elapsed + TERRAIN_SPEED_BOOST_LINGER;
   }
@@ -4634,6 +5243,7 @@ function update(dt) {
   updatePlayerVelocity(dt);
   updateArenaNexus(simDt);
   updateRouletteHex(simDt);
+  updateSurgeHex(simDt);
   if (!pauseHostiles) {
     moveHunters(enemySimDt);
     updateSnipers(enemySimDt);
@@ -5055,6 +5665,7 @@ function render(tsMs) {
   drawObstacles(ctx, obstacles);
   drawArenaNexusWorld(ctx);
   drawRouletteHexWorld(ctx);
+  drawSurgeHexWorld(ctx);
   if (hasAnyRouletteHexSite() && state.elapsed < state.rouletteScreenFlashUntil) {
     const u = clamp((state.rouletteScreenFlashUntil - state.elapsed) / 0.4, 0, 1);
     ctx.fillStyle = `rgba(220, 38, 38, ${0.38 * u})`;
@@ -5064,6 +5675,14 @@ function render(tsMs) {
       ctx.arc(c.x, c.y, HEX_SIZE * 0.98, 0, TAU);
       ctx.fill();
     }
+  }
+  if (state.surgePhase === 2 && state.elapsed < state.surgeScreenFlashUntil) {
+    const u = clamp((state.surgeScreenFlashUntil - state.elapsed) / SURGE_TILE_FLASH_SEC, 0, 1);
+    ctx.fillStyle = `rgba(220, 38, 38, ${0.42 * u})`;
+    const c = hexToWorld(state.surgeLockQ, state.surgeLockR);
+    ctx.beginPath();
+    ctx.arc(c.x, c.y, HEX_SIZE * 0.98, 0, TAU);
+    ctx.fill();
   }
 
   for (const smoke of entities.smokeZones) {
@@ -5654,7 +6273,8 @@ function render(tsMs) {
   // Capture death snapshots from the clean gameplay frame before screen-space damage/death overlays.
   if (state.snapshotPending) {
     state.snapshotPending = false;
-    saveDeathSnapshot().catch(() => {
+    saveDeathSnapshot().catch((err) => {
+      runLog.fail(LogCodes.E_SNAPSHOT_RENDER_HOOK, "Death snapshot async task rejected from render hook.", err);
       setSnapshotStatus("Death screenshots: save failed");
     });
   }
@@ -5774,12 +6394,17 @@ function getSimulationTimeScale() {
 }
 
 function loop(ts) {
-  if (!state.lastTime) state.lastTime = ts;
-  const dt = Math.min((ts - state.lastTime) / 1000, 0.033);
-  state.lastTime = ts;
-  const scale = getSimulationTimeScale();
-  update(dt * scale);
-  render(ts);
+  try {
+    if (!state.lastTime) state.lastTime = ts;
+    const dt = Math.min((ts - state.lastTime) / 1000, 0.033);
+    state.lastTime = ts;
+    const scale = getSimulationTimeScale();
+    update(dt * scale);
+    render(ts);
+  } catch (err) {
+    runLog.fail(LogCodes.E_MAIN_LOOP, "Uncaught error in game loop (update/render).", err);
+    throw err;
+  }
   requestAnimationFrame(loop);
 }
 
@@ -5817,6 +6442,7 @@ window.addEventListener("keydown", (event) => {
       return;
     }
     state.manualPause = false;
+    runLog.event(LogCodes.EVT_MANUAL_RESUME, "Manual pause: resumed");
   }
   if (state.pausedForRoulette && key === "escape") {
     event.preventDefault();
@@ -5829,6 +6455,7 @@ window.addEventListener("keydown", (event) => {
   }
   if (key === " " && !state.pausedForCard && !state.inventoryModalOpen) {
     state.manualPause = true;
+    runLog.event(LogCodes.EVT_MANUAL_PAUSE, "Manual pause: paused (Space)");
     state.keys.clear();
     return;
   }

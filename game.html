@@ -1211,6 +1211,44 @@
         line-height: 1.35;
         color: #64748b;
       }
+
+      .run-log-dev-actions {
+        margin-top: 12px;
+        padding-top: 10px;
+        border-top: 1px solid #334155;
+      }
+
+      .run-log-dev-actions > span {
+        display: block;
+        margin: 0 0 6px;
+        font-weight: 600;
+        color: #94a3b8;
+        font-size: 11px;
+        letter-spacing: 0.03em;
+        text-transform: uppercase;
+      }
+
+      .run-log-dev-row {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 6px;
+      }
+
+      .run-log-dev-row button {
+        flex: 1 1 42%;
+        min-width: 0;
+        padding: 6px 8px;
+        border-radius: 8px;
+        border: 1px solid #64748b;
+        background: #1e293b;
+        color: #e2e8f0;
+        font-size: 11px;
+        cursor: pointer;
+      }
+
+      .run-log-dev-row button:hover {
+        background: #334155;
+      }
     </style>
   </head>
   <body>
@@ -1220,8 +1258,20 @@
         <option value="na" selected>None</option>
         <option value="arena">Arena nexus</option>
         <option value="roulette">Roulette forge</option>
+        <option value="surge">Gauntlet hex</option>
       </select>
       <p class="special-test-west-hint">Editable during character select only.</p>
+      <div class="run-log-dev-actions" aria-label="Run log (last 30 entries)">
+        <span>Run log</span>
+        <div class="run-log-dev-row">
+          <button id="run-log-print-console" type="button" title="Print buffered log lines to the console">
+            Print log
+          </button>
+          <button id="run-log-download-txt" type="button" title="Download buffered log as .txt">
+            Download .txt
+          </button>
+        </div>
+      </div>
     </div>
     <main class="wrap">
       <h1>Escape</h1>

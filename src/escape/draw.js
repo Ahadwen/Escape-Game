@@ -48,3 +48,53 @@ export function drawObstacles(ctx, obstacles) {
     ctx.strokeRect(o.x, o.y, o.w, o.h);
   }
 }
+
+export function strokePointyHexOutline(ctx, cx, cy, vertexRadius, strokeStyle, lineWidth, glowBlur) {
+  ctx.save();
+  ctx.shadowColor = strokeStyle;
+  ctx.shadowBlur = glowBlur;
+  ctx.strokeStyle = strokeStyle;
+  ctx.lineWidth = lineWidth;
+  ctx.beginPath();
+  for (let i = 0; i < 6; i++) {
+    const a = -Math.PI / 2 + (Math.PI / 3) * i;
+    const x = cx + Math.cos(a) * vertexRadius;
+    const y = cy + Math.sin(a) * vertexRadius;
+    if (i === 0) ctx.moveTo(x, y);
+    else ctx.lineTo(x, y);
+  }
+  ctx.closePath();
+  ctx.stroke();
+  ctx.shadowBlur = 0;
+  ctx.stroke();
+  ctx.restore();
+}
+
+/** Rainbow fill for roulette hex; `elapsed` drives spin (game seconds). */
+export function fillPointyHexRainbowGlow(ctx, cx, cy, vertexRadius, elapsed) {
+  ctx.save();
+  ctx.beginPath();
+  for (let i = 0; i < 6; i++) {
+    const a = -Math.PI / 2 + (Math.PI / 3) * i;
+    const x = cx + Math.cos(a) * vertexRadius;
+    const y = cy + Math.sin(a) * vertexRadius;
+    if (i === 0) ctx.moveTo(x, y);
+    else ctx.lineTo(x, y);
+  }
+  ctx.closePath();
+  const spin = elapsed * 2.8;
+  if (typeof ctx.createConicGradient === "function") {
+    const g = ctx.createConicGradient(spin, cx, cy);
+    for (let k = 0; k <= 7; k++) g.addColorStop(k / 7, `hsl(${(k / 7) * 360} 92% 58%)`);
+    ctx.fillStyle = g;
+  } else {
+    ctx.fillStyle = `hsla(${(elapsed * 110) % 360}, 92%, 58%, 0.55)`;
+  }
+  ctx.globalAlpha = 0.52;
+  ctx.fill();
+  ctx.globalAlpha = 1;
+  ctx.strokeStyle = "rgba(255,255,255,0.35)";
+  ctx.lineWidth = 1.5;
+  ctx.stroke();
+  ctx.restore();
+}
