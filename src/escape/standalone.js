@@ -4,6 +4,8 @@
   var TILE_W = 560;
   var BLOCK = 35;
   var HEAL_PICKUP_HIT_R = 24;
+  var CARD_PICKUP_HIT_R = 20;
+  var CARD_PICKUP_REACH_EXTRA = 10;
   var HEAL_PICKUP_PLUS_HALF = 13;
   var HEAL_PICKUP_ARM_THICK = 6;
   var SNIPER_ARTILLERY_WINDUP = 1.38;
@@ -101,8 +103,34 @@
         decoy: { key: "e", label: "Steer right", cooldown: 0, minCooldown: 0 },
         random: { key: "r", label: "Roar" }
       }
+    },
+    valiant: {
+      id: "valiant",
+      name: "The Valiant",
+      /** Robot body: no personal HP pool; rabbits + Will track survival. */
+      baseHp: 1,
+      cooldownAbilityIds: ["dash", "burst", "decoy"],
+      abilities: {
+        dash: { key: "q", label: "Surge", cooldown: 5, minCooldown: 0.45, duration: 3 },
+        burst: { key: "w", label: "Shock field", cooldown: 6.5, minCooldown: 0.5, duration: 0 },
+        decoy: { key: "e", label: "Rescue", cooldown: 25, minCooldown: 0.5 },
+        random: { key: "r", label: "Ultimate" }
+      }
     }
   };
+  var VALIANT_RABBIT_BASE_HP = 4;
+  var VALIANT_RESCUE_COOLDOWN_SEC = 25;
+  var VALIANT_RESCUE_WILL_RESTORE = 0.4;
+  var VALIANT_WILL_RABBIT_DEATH_COST = 0.25;
+  var VALIANT_WILL_DECAY_PER_EMPTY_SLOT = 7e-3;
+  var VALIANT_WILL_REGEN_PER_SEC_THREE_RABBITS = 3e-3;
+  var VALIANT_SHOCK_BOX_W = 168;
+  var VALIANT_SHOCK_BOX_H = 120;
+  var VALIANT_SHOCK_BOX_DURATION_SEC = 4.6;
+  var VALIANT_BUNNY_PICKUP_R = 12;
+  var VALIANT_BUNNY_SPAWN_INTERVAL = 7.2;
+  var VALIANT_DIAMOND_RESCUE_WILL_BONUS = 0.12;
+  var VALIANT_DIAMOND_BOX_SCALE = 1.32;
   var LUNATIC_PASSIVE_HP_PER_SEC = 0.28;
   var LUNATIC_STUMBLE_MOVE_MULT = 0.66;
   var LUNATIC_W_TOGGLE_COOLDOWN_SEC = 4;
@@ -731,6 +759,100 @@
     ctx.closePath();
     ctx.fillStyle = g;
     ctx.fill();
+    ctx.restore();
+  }
+  var CARD_PICKUP_SUIT_GLYPH = {
+    hearts: "\u2665",
+    diamonds: "\u2666",
+    clubs: "\u2663",
+    spades: "\u2660"
+  };
+  function cardPickupRankLabel(rank) {
+    if (rank === 1) return "A";
+    if (rank === 11) return "J";
+    if (rank === 12) return "Q";
+    if (rank === 13) return "K";
+    return String(rank);
+  }
+  function cardPickupSuitPalette(suit) {
+    if (suit === "hearts") return { ink: "#b91c1c", fill: "#fff1f2", rim: "rgba(185, 28, 28, 0.45)" };
+    if (suit === "diamonds") return { ink: "#b91c1c", fill: "#fff5f5", rim: "rgba(185, 28, 28, 0.42)" };
+    if (suit === "clubs") return { ink: "#166534", fill: "#f0fdf4", rim: "rgba(22, 101, 52, 0.45)" };
+    return { ink: "#0f172a", fill: "#f8fafc", rim: "rgba(15, 23, 42, 0.4)" };
+  }
+  function drawCardPickupMiniFace(ctx, card, w, h) {
+    const { ink, fill, rim } = cardPickupSuitPalette(card.suit);
+    const glyph = CARD_PICKUP_SUIT_GLYPH[card.suit] ?? "?";
+    const hw = w / 2;
+    const hh = h / 2;
+    ctx.save();
+    ctx.shadowColor = "rgba(15, 23, 42, 0.35)";
+    ctx.shadowBlur = 10;
+    ctx.shadowOffsetY = 2;
+    ctx.fillStyle = fill;
+    ctx.fillRect(-hw, -hh, w, h);
+    ctx.shadowBlur = 0;
+    ctx.shadowOffsetY = 0;
+    ctx.strokeStyle = rim;
+    ctx.lineWidth = 2;
+    ctx.strokeRect(-hw + 1, -hh + 1, w - 2, h - 2);
+    ctx.fillStyle = ink;
+    ctx.font = "bold 11px ui-sans-serif, system-ui, sans-serif";
+    ctx.textAlign = "left";
+    ctx.textBaseline = "top";
+    ctx.fillText(`${cardPickupRankLabel(card.rank)}${glyph}`, -hw + 4, -hh + 3);
+    ctx.font = "bold 20px ui-serif, Georgia, 'Times New Roman', serif";
+    ctx.textAlign = "center";
+    ctx.textBaseline = "middle";
+    ctx.fillText(glyph, 0, 1);
+    ctx.restore();
+  }
+  function drawCardPickupWorld(ctx, pickup, elapsed) {
+    const born = pickup.bornAt ?? elapsed;
+    const bob = Math.sin((elapsed - born) * 4.2) * 2.2;
+    const cx = pickup.x;
+    const cy = pickup.y + bob;
+    const flipT = (elapsed - born) * 2.35;
+    const cos = Math.cos(flipT);
+    const scaleX = Math.max(0.11, Math.abs(cos));
+    const face = cos >= 0 ? pickup.card : pickup.flipCard ?? pickup.card;
+    const w = 28;
+    const h = 38;
+    const spotR = Math.max(48, (pickup.r ?? 20) * 2.6);
+    ctx.save();
+    ctx.translate(cx, cy);
+    const g0 = ctx.createRadialGradient(0, 0, 0, 0, 0, spotR);
+    g0.addColorStop(0, "rgba(254, 252, 232, 0.42)");
+    g0.addColorStop(0.35, "rgba(251, 191, 36, 0.14)");
+    g0.addColorStop(0.65, "rgba(59, 130, 246, 0.06)");
+    g0.addColorStop(1, "rgba(15, 23, 42, 0)");
+    ctx.fillStyle = g0;
+    ctx.beginPath();
+    ctx.arc(0, 0, spotR, 0, TAU);
+    ctx.fill();
+    const ringPulse = 0.5 + 0.5 * Math.sin(elapsed * 3.1 + born * 0.7);
+    const ringR = (pickup.r ?? 20) + 10 + ringPulse * 5;
+    ctx.strokeStyle = `rgba(255, 255, 255, ${0.22 + 0.18 * ringPulse})`;
+    ctx.lineWidth = 1.5;
+    ctx.beginPath();
+    ctx.arc(0, 0, ringR, 0, TAU);
+    ctx.stroke();
+    ctx.strokeStyle = `rgba(251, 191, 36, ${0.12 + 0.1 * ringPulse})`;
+    ctx.lineWidth = 2.5;
+    ctx.beginPath();
+    ctx.arc(0, 0, ringR + 3, 0, TAU);
+    ctx.stroke();
+    ctx.scale(scaleX, 1);
+    if (scaleX < 0.2) {
+      ctx.strokeStyle = "rgba(248, 250, 252, 0.85)";
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      ctx.moveTo(0, -h * 0.55);
+      ctx.lineTo(0, h * 0.55);
+      ctx.stroke();
+    } else {
+      drawCardPickupMiniFace(ctx, face, w, h);
+    }
     ctx.restore();
   }
 
@@ -2969,6 +3091,22 @@
       lunaticHealExcludeHexKey: (
         /** @type {string} */
         ""
+      ),
+      /** Valiant: 0–1 “Will to live”; drain eases with more equipped rabbits, flat at two, slight regen at three. */
+      valiantWill: 1,
+      /** Valiant: [left, right, back] — each slot `{ hp, maxHp }` or null. */
+      valiantRabbitSlots: (
+        /** @type {(null | { hp: number; maxHp: number })[]} */
+        [null, null, null]
+      ),
+      /** Valiant E: `elapsed` when Rescue may be used again. */
+      valiantRescueReadyAt: 0,
+      /** Valiant: next wild bunny spawn time (`elapsed`). */
+      valiantNextBunnyAt: 0,
+      /** Valiant hearts itemisation: per-slot bonus max HP from `maxHp` cards (random split). */
+      valiantSlotBonusMax: (
+        /** @type {number[]} */
+        [0, 0, 0]
       )
     };
     let snapshotDirectoryHandle = null;
@@ -3010,7 +3148,13 @@
       smokeZones: [],
       foods: [],
       /** @type {{ bornAt: number; expiresAt: number; tier: 2 | 4 }[]} */
-      lunaticSprintTierFx: []
+      lunaticSprintTierFx: [],
+      /** Valiant: wild rabbits to pick up (world). */
+      valiantBunnies: [],
+      /** Valiant W: temporary blocking rects `{ x, y, w, h, expiresAt }`. */
+      valiantElectricBoxes: [],
+      /** Valiant: short-lived rescue / rabbit-death VFX in world space. */
+      valiantRabbitFx: []
     };
     function makeEmptyDeckByRank() {
       const a = new Array(14).fill(null);
@@ -3031,7 +3175,9 @@
       heartsRegenBank: 0,
       lunaticRegenBank: 0,
       dodgeTextUntil: 0,
-      rogueDiamondRangeBoost: false
+      rogueDiamondRangeBoost: false,
+      /** Valiant: extra W charges from Spades `dashCharge` cards (see `recalcCardPassives`). */
+      valiantElectricBoxChargeBonus: 0
     };
     const passive = {
       cooldownFlat: makeCooldownFlatForCharacter(selectedCharacter),
@@ -3045,6 +3191,11 @@
       heartsShieldArc: 0
     };
     const dashState = {
+      charges: 1,
+      maxCharges: 1,
+      nextRechargeAt: 0
+    };
+    const valiantBoxChargeState = {
       charges: 1,
       maxCharges: 1,
       nextRechargeAt: 0
@@ -3190,6 +3341,16 @@
         effect: makeCardEffect(suit, rank)
       };
     }
+    function makePickupFlipFace(realCard) {
+      const suits = ["diamonds", "hearts", "clubs", "spades"];
+      for (let attempt = 0; attempt < 32; attempt++) {
+        const suit = suits[Math.floor(Math.random() * suits.length)];
+        const rank = 1 + Math.floor(Math.random() * 13);
+        if (suit !== realCard.suit || rank !== realCard.rank) return { suit, rank };
+      }
+      const altSuit = suits.find((s) => s !== realCard.suit) ?? "spades";
+      return { suit: altSuit, rank: realCard.rank === 1 ? 2 : realCard.rank - 1 };
+    }
     function makeJokerArenaRewardCard() {
       const ranks = [10, 11, 12, 13];
       const rank = ranks[Math.floor(Math.random() * ranks.length)];
@@ -3301,6 +3462,7 @@
       inventory.heartsRegenPerSec = 0;
       inventory.clubsPhaseThroughTerrain = false;
       inventory.rogueDiamondRangeBoost = false;
+      inventory.valiantElectricBoxChargeBonus = 0;
       let maxHpBonus = 0;
       const suits = { diamonds: 0, hearts: 0, clubs: 0, spades: 0 };
       forEachDeckCard((card) => {
@@ -3320,8 +3482,10 @@
         else if (e.kind === "invisBurst") passive.invisOnBurst += e.value;
         else if (e.kind === "speed") passive.speedMult += e.value;
         else if (e.kind === "terrainBoost") passive.obstacleTouchMult += e.value;
-        else if (e.kind === "dashCharge") passive.dashChargesBonus += e.value;
-        else if (e.kind === "frontShield") passive.heartsShieldArc += e.arc;
+        else if (e.kind === "dashCharge") {
+          if (isValiant() && card.suit === "spades") inventory.valiantElectricBoxChargeBonus += e.value;
+          else if (!isValiant()) passive.dashChargesBonus += e.value;
+        } else if (e.kind === "frontShield") passive.heartsShieldArc += e.arc;
       });
       deckSuitCounts = { ...suits };
       player.r = suits.clubs >= SET_BONUS_SUIT_MAX ? PLAYER_BASE_HITBOX_R * CLUBS_13_HITBOX_MULT : PLAYER_BASE_HITBOX_R;
@@ -3340,8 +3504,28 @@
       }
       dashState.maxCharges = 1 + passive.dashChargesBonus;
       dashState.charges = Math.min(dashState.charges || dashState.maxCharges, dashState.maxCharges);
-      player.maxHp = Math.max(1, selectedCharacter.baseHp + maxHpBonus);
-      player.hp = Math.min(player.hp, player.maxHp);
+      if (isValiant()) {
+        valiantBoxChargeState.maxCharges = 1 + inventory.valiantElectricBoxChargeBonus;
+        valiantBoxChargeState.charges = Math.min(
+          valiantBoxChargeState.charges || valiantBoxChargeState.maxCharges,
+          valiantBoxChargeState.maxCharges
+        );
+        const bonusSplit = [0, 0, 0];
+        for (let k = 0; k < maxHpBonus; k++) bonusSplit[Math.floor(Math.random() * 3)]++;
+        state.valiantSlotBonusMax = bonusSplit;
+        for (let i = 0; i < 3; i++) {
+          const s = state.valiantRabbitSlots[i];
+          if (s) {
+            s.maxHp = VALIANT_RABBIT_BASE_HP + bonusSplit[i];
+            s.hp = Math.min(s.hp, s.maxHp);
+          }
+        }
+        player.maxHp = 1;
+        player.hp = 1;
+      } else {
+        player.maxHp = Math.max(1, selectedCharacter.baseHp + maxHpBonus);
+        player.hp = Math.min(player.hp, player.maxHp);
+      }
       renderCardSlots();
       syncUltimateFromAceDeck();
       updateSetBonusStatus();
@@ -3370,24 +3554,34 @@
       if (suits.diamonds >= SET_BONUS_SUIT_THRESHOLD) {
         if (selectedCharacter.id === "rogue") {
           lines.push("Set bonus! Diamonds: dash range and smoke radius increased.");
+        } else if (isValiant()) {
+          const pick = suits.diamonds >= SET_BONUS_SUIT_MAX ? "Surge, shock field, and Rescue all empowered" : inventory.diamondEmpower === "valiantSpeed" ? "Surge: +30% speed, +1.5s duration (passive)" : inventory.diamondEmpower === "valiantBox" ? "shock field tiles are larger" : inventory.diamondEmpower === "valiantRescue" ? "Rescue restores more Will" : "choose your empowerment in inventory";
+          lines.push(`Set bonus! Diamonds: ${pick}.`);
         } else {
-          const pick = suits.diamonds >= SET_BONUS_SUIT_MAX ? "dash, burst, and decoy all empowered" : inventory.diamondEmpower === "dash2x" ? "dash goes twice as far" : inventory.diamondEmpower === "speedPassive" ? selectedCharacter.id === "knight" ? "speed burst: +30% boost, +1.5s on W (always on)" : "speed burst is passive" : inventory.diamondEmpower === "decoyLead" ? "decoy drifts away, cooldown -2s, duration +1s" : "choose your empowerment in inventory";
+          const pick = suits.diamonds >= SET_BONUS_SUIT_MAX ? "dash, burst, and decoy all empowered" : inventory.diamondEmpower === "dash2x" ? "dash goes twice as far" : inventory.diamondEmpower === "speedPassive" ? "speed burst: +30% boost, +1.5s on W (always on)" : inventory.diamondEmpower === "decoyLead" ? "decoy drifts away, cooldown -2s, duration +1s" : "choose your empowerment in inventory";
           lines.push(`Set bonus! Diamonds: ${pick}.`);
         }
       }
-      if (suits.hearts >= SET_BONUS_SUIT_THRESHOLD) lines.push("Set bonus! Hearts: passive HP regeneration.");
+      if (suits.hearts >= SET_BONUS_SUIT_THRESHOLD) {
+        lines.push(
+          isValiant() ? "Set bonus! Hearts: regen ticks heal injured rabbits at random." : "Set bonus! Hearts: passive HP regeneration."
+        );
+      }
       if (suits.clubs >= SET_BONUS_SUIT_THRESHOLD) {
         lines.push(
-          selectedCharacter.id === "rogue" ? "Set bonus! Clubs: phase through terrain while inside smoke." : "Set bonus! Clubs: burst phase-through terrain."
+          selectedCharacter.id === "rogue" ? "Set bonus! Clubs: phase through terrain while inside smoke." : isValiant() ? "Set bonus! Clubs: phase through terrain while Surge (Q) is active." : "Set bonus! Clubs: burst phase-through terrain."
         );
       }
       if (suits.spades >= SET_BONUS_SUIT_THRESHOLD) {
         lines.push(
-          selectedCharacter.id === "rogue" ? "Set bonus! Spades: dash from stealth snaps you back into stealth on landing (extra grace to hug cover)." : "Set bonus! Spades: using your ultimate (R) slows hunters, shots, and hazards to 30% speed for 2 seconds."
+          selectedCharacter.id === "rogue" ? "Set bonus! Spades: dash from stealth snaps you back into stealth on landing (extra grace to hug cover)." : isValiant() ? "Set bonus! Spades: +1 shock-field charge (J/Q/K); using your ultimate (R) still slows the world for 2s." : "Set bonus! Spades: using your ultimate (R) slows hunters, shots, and hazards to 30% speed for 2 seconds."
         );
       }
       if (suits.diamonds >= SET_BONUS_SUIT_MAX && selectedCharacter.id === "rogue") {
         lines.push("Set bonus! Diamonds (13): maximum dash, smoke, and consume tuning.");
+      }
+      if (suits.diamonds >= SET_BONUS_SUIT_MAX && isValiant()) {
+        lines.push("Set bonus! Diamonds (13): maximum Surge, shock field, and Rescue tuning.");
       }
       if (suits.hearts >= SET_BONUS_SUIT_MAX) {
         lines.push("Set bonus! Hearts (13): death defiance \u2014 survive a lethal hit at 5 HP (30s cooldown).");
@@ -3461,7 +3655,7 @@
       return deckSuitCounts.diamonds >= SET_BONUS_SUIT_MAX;
     }
     function knightDiamondBurstEmpowerActive() {
-      return selectedCharacter.id === "knight" && (inventory.diamondEmpower === "speedPassive" || diamondsOmniEmpowerActive());
+      return selectedCharacter.id === "knight" && inventory.diamondEmpower === "speedPassive" || selectedCharacter.id === "valiant" && inventory.diamondEmpower === "valiantSpeed" || diamondsOmniEmpowerActive();
     }
     function spades13AuraEnemyDtMult(worldX, worldY) {
       if (deckSuitCounts.spades < SET_BONUS_SUIT_MAX) return 1;
@@ -3474,23 +3668,35 @@
       return { diamonds: "Diamonds", hearts: "Hearts", clubs: "Clubs", spades: "Spades" }[suit] ?? suit;
     }
     function suitSetBonusGoalLabel(suit) {
-      if (suit === "hearts") return "continuous health regen";
+      if (suit === "hearts") return isValiant() ? "regen heals rabbits at random" : "continuous health regen";
       if (suit === "diamonds") {
-        return selectedCharacter.id === "rogue" ? "larger dash & smoke radius" : "ability empowerment";
+        if (selectedCharacter.id === "rogue") return "larger dash & smoke radius";
+        if (isValiant()) return "Surge / shock field / Rescue empowerment";
+        return "ability empowerment";
       }
       if (suit === "clubs") {
-        return selectedCharacter.id === "rogue" ? "phase through terrain in smoke" : "burst phases through terrain";
+        if (selectedCharacter.id === "rogue") return "phase through terrain in smoke";
+        if (isValiant()) return "phase through terrain during Surge (Q)";
+        return "burst phases through terrain";
       }
       if (suit === "spades") {
-        return selectedCharacter.id === "rogue" ? "stealth refresh on stealth-dash landing" : "after ultimate: world (except you) at 30% speed for 2s";
+        if (selectedCharacter.id === "rogue") return "stealth refresh on stealth-dash landing";
+        if (isValiant()) return "+1 shock-field charge; ultimate world slow";
+        return "after ultimate: world (except you) at 30% speed for 2s";
       }
       return "";
     }
     function diamondsActiveSummary() {
       if (diamondsOmniEmpowerActive()) {
-        return selectedCharacter.id === "rogue" ? "maximum dash, smoke, and consume tuning" : "all three diamond empowerments active";
+        return selectedCharacter.id === "rogue" ? "maximum dash, smoke, and consume tuning" : isValiant() ? "maximum Surge, shock field, and Rescue tuning" : "all three diamond empowerments active";
       }
       if (selectedCharacter.id === "rogue") return "larger dash & smoke radius";
+      if (isValiant()) {
+        if (inventory.diamondEmpower === "valiantSpeed") return "Surge: +30% boost, +1.5s duration (passive)";
+        if (inventory.diamondEmpower === "valiantBox") return "larger shock field tiles";
+        if (inventory.diamondEmpower === "valiantRescue") return "Rescue restores more Will";
+        return "choose empowerment below";
+      }
       if (inventory.diamondEmpower === "dash2x") return "dash goes twice as far";
       if (inventory.diamondEmpower === "speedPassive") {
         return selectedCharacter.id === "knight" ? "speed burst: +30% boost, +1.5s burst duration (always on)" : "speed burst is passive";
@@ -3500,16 +3706,22 @@
     }
     function suitSetBonusSevenActiveShort(suit) {
       if (suit === "diamonds") return diamondsActiveSummary();
-      if (suit === "hearts") return "passive HP regeneration";
+      if (suit === "hearts") return isValiant() ? "regen heals rabbits" : "passive HP regeneration";
       if (suit === "clubs") {
-        return selectedCharacter.id === "rogue" ? "phase through terrain while inside smoke" : "burst phase-through terrain";
+        if (selectedCharacter.id === "rogue") return "phase through terrain while inside smoke";
+        if (isValiant()) return "phase during Surge (Q)";
+        return "burst phase-through terrain";
       }
-      return selectedCharacter.id === "rogue" ? "stealth refresh on stealth-dash landing" : "after ultimate: 30% world speed for 2s";
+      if (selectedCharacter.id === "rogue") return "stealth refresh on stealth-dash landing";
+      if (isValiant()) return "+1 shock charge; ult world slow";
+      return "after ultimate: 30% world speed for 2s";
     }
     function suitSetBonusTierTwoGoalLabel(suit) {
       if (suit === "hearts") return "death defiance on 30s cooldown (lethal \u2192 5 HP)";
       if (suit === "diamonds") {
-        return selectedCharacter.id === "rogue" ? "stronger dash, smoke, and consume together" : "all three abilities empowered at once";
+        if (selectedCharacter.id === "rogue") return "stronger dash, smoke, and consume together";
+        if (isValiant()) return "Surge, shock field, and Rescue all empowered at once";
+        return "all three abilities empowered at once";
       }
       if (suit === "clubs") return "30% smaller hitbox; 1s untargetable after a hit";
       if (suit === "spades") return "~2in aura: hostiles inside slowed ~30%";
@@ -3518,7 +3730,9 @@
     function suitSetBonusTierTwoActiveShort(suit) {
       if (suit === "hearts") return "death defiance (30s CD \u2192 5 HP)";
       if (suit === "diamonds") {
-        return selectedCharacter.id === "rogue" ? "maximum diamond mobility" : "all three empowerments active";
+        if (selectedCharacter.id === "rogue") return "maximum diamond mobility";
+        if (isValiant()) return "all three Valiant empowerments active";
+        return "all three empowerments active";
       }
       if (suit === "clubs") return "smaller hitbox; untargetable 1s on hit";
       if (suit === "spades") return "nearby hostiles slowed ~30% in aura";
@@ -3768,14 +3982,20 @@
           });
           return btn;
         };
-        cardSwapRow.appendChild(mk("dash2x", "Dash goes twice as far"));
-        cardSwapRow.appendChild(
-          mk(
-            "speedPassive",
-            selectedCharacter.id === "knight" ? "Burst: +30% speed boost, +1.5s duration (passive)" : "Speed burst is passive"
-          )
-        );
-        cardSwapRow.appendChild(mk("decoyLead", "Decoy drifts away, -2s cooldown, +1s duration"));
+        if (isValiant()) {
+          cardSwapRow.appendChild(mk("valiantSpeed", "Surge: +30% speed boost, +1.5s duration (passive)"));
+          cardSwapRow.appendChild(mk("valiantBox", "Shock field tiles are larger"));
+          cardSwapRow.appendChild(mk("valiantRescue", "Rescue restores more Will"));
+        } else {
+          cardSwapRow.appendChild(mk("dash2x", "Dash goes twice as far"));
+          cardSwapRow.appendChild(
+            mk(
+              "speedPassive",
+              selectedCharacter.id === "knight" ? "Burst: +30% speed boost, +1.5s duration (passive)" : "Speed burst is passive"
+            )
+          );
+          cardSwapRow.appendChild(mk("decoyLead", "Decoy drifts away, -2s cooldown, +1s duration"));
+        }
       }
       const leaveBtn = document.createElement("button");
       leaveBtn.type = "button";
@@ -3880,8 +4100,367 @@
       }
       return false;
     }
+    function collidesValiantEnemyShockField(circle) {
+      for (const box of entities.valiantElectricBoxes) {
+        if (state.elapsed >= box.expiresAt) continue;
+        if (intersectsRectCircle(circle, box)) return true;
+      }
+      return false;
+    }
     function isLunatic() {
       return selectedCharacter.id === "lunatic";
+    }
+    function isValiant() {
+      return selectedCharacter.id === "valiant";
+    }
+    function valiantShockBoxScale() {
+      if (inventory.diamondEmpower === "valiantBox" || diamondsOmniEmpowerActive()) return VALIANT_DIAMOND_BOX_SCALE;
+      return 1;
+    }
+    function valiantFirstEmptySlot() {
+      for (let i = 0; i < 3; i++) if (!state.valiantRabbitSlots[i]) return i;
+      return -1;
+    }
+    function valiantLowestHpOccupiedSlot() {
+      let best = -1;
+      let bestHp = Infinity;
+      for (let i = 0; i < 3; i++) {
+        const s = state.valiantRabbitSlots[i];
+        if (!s || s.hp <= 0) continue;
+        if (best < 0 || s.hp < bestHp || s.hp === bestHp && i < best) {
+          bestHp = s.hp;
+          best = i;
+        }
+      }
+      return best;
+    }
+    function valiantRandomOccupiedRabbitIndex() {
+      const opts = [];
+      for (let i = 0; i < 3; i++) {
+        const s = state.valiantRabbitSlots[i];
+        if (s && s.hp > 0) opts.push(i);
+      }
+      if (!opts.length) return -1;
+      return opts[Math.floor(Math.random() * opts.length)];
+    }
+    function valiantRabbitAnchorWorld(slot) {
+      const px = player.x;
+      const py = player.y;
+      const fx = player.facing.x || 1;
+      const fy = player.facing.y || 0;
+      const fl = Math.hypot(fx, fy) || 1;
+      const rdx = fx / fl;
+      const rdy = fy / fl;
+      const lx = -rdy;
+      const ly = rdx;
+      const spots = [
+        { slot: 0, ox: lx * 15 - rdx * 7, oy: ly * 15 - rdy * 7 },
+        { slot: 1, ox: -lx * 15 - rdx * 7, oy: -ly * 15 - rdy * 7 },
+        { slot: 2, ox: -rdx * 19, oy: -rdy * 19 }
+      ];
+      const sp = spots.find((s) => s.slot === slot);
+      if (!sp) return { x: px, y: py };
+      return { x: px + sp.ox, y: py + sp.oy };
+    }
+    function valiantTriggerDeathFromWill() {
+      if (!state.running) return;
+      state.valiantWill = 0;
+      player.hp = 0;
+      state.running = false;
+      state.deathCount += 1;
+      if (deathSnapshotsEnabled) state.snapshotPending = true;
+      state.deathStartedAtMs = state.lastTime;
+      state.bestSurvival = Math.max(state.bestSurvival, runClockEffectiveSec());
+    }
+    function valiantApplyDamage(amount, opts = {}) {
+      if (amount <= 0) return;
+      const dmg = opts.surgeHexPulse ? 1 : amount;
+      const idx = opts.surgeHexPulse ? valiantLowestHpOccupiedSlot() : valiantRandomOccupiedRabbitIndex();
+      if (idx < 0) return;
+      const slot = state.valiantRabbitSlots[idx];
+      if (!slot) return;
+      slot.hp -= dmg;
+      if (opts.laserBlueSlow) {
+        state.playerLaserSlowUntil = state.elapsed + LASER_BLUE_PLAYER_SLOW_SEC;
+      }
+      state.hurtFlash = 0.16;
+      state.playerInvulnerableUntil = state.elapsed + 0.35;
+      state.screenShakeUntil = state.elapsed + 0.18;
+      state.screenShakeStrength = 8;
+      entities.damageRipples.push({
+        x: player.x,
+        y: player.y,
+        bornAt: state.elapsed,
+        expiresAt: state.elapsed + 0.22
+      });
+      state.damageEvents.push({ t: state.elapsed, amount: dmg, hpAfter: Math.round(state.valiantWill * 100) });
+      if (passive.stunOnHitSecs > 0) {
+        for (const h of entities.hunters) {
+          if (distSq(h, player) <= 220 * 220) h.stunnedUntil = Math.max(h.stunnedUntil || 0, state.elapsed + passive.stunOnHitSecs);
+        }
+      }
+      if (slot.hp <= 0) {
+        const { x: dax, y: day } = valiantRabbitAnchorWorld(idx);
+        spawnValiantRabbitDeathFx(dax, day);
+        triggerUltScreenShake(16, 0.26);
+        state.valiantRabbitSlots[idx] = null;
+        state.valiantWill = Math.max(0, state.valiantWill - VALIANT_WILL_RABBIT_DEATH_COST);
+        spawnHealPopup(player.x, player.y - player.r - 14, "Rabbit lost", "#fca5a5", 0.85, 13);
+        if (state.valiantWill <= 0) valiantTriggerDeathFromWill();
+      }
+    }
+    function valiantOccupiedRabbitCount() {
+      let n = 0;
+      for (let i = 0; i < 3; i++) if (state.valiantRabbitSlots[i]) n++;
+      return n;
+    }
+    function valiantWillNetChangePerSec() {
+      const occ = valiantOccupiedRabbitCount();
+      const drainAtZeroRabbits = 3 * VALIANT_WILL_DECAY_PER_EMPTY_SLOT;
+      if (occ === 0) return -drainAtZeroRabbits;
+      if (occ === 1) return -drainAtZeroRabbits / 2;
+      if (occ === 2) return 0;
+      return VALIANT_WILL_REGEN_PER_SEC_THREE_RABBITS;
+    }
+    function updateValiantWillDecay(simDt) {
+      if (!isValiant() || !state.running) return;
+      const netPerSec = valiantWillNetChangePerSec();
+      state.valiantWill += netPerSec * simDt;
+      state.valiantWill = Math.min(1, state.valiantWill);
+      if (state.valiantWill <= 0) valiantTriggerDeathFromWill();
+    }
+    function spawnValiantWildBunny() {
+      if (!isValiant()) return;
+      const point = randomOpenPoint(VALIANT_BUNNY_PICKUP_R, 72, { excludeArenaNexus: true });
+      entities.valiantBunnies.push({
+        x: point.x,
+        y: point.y,
+        r: VALIANT_BUNNY_PICKUP_R,
+        bornAt: state.elapsed,
+        expiresAt: state.elapsed + 18
+      });
+    }
+    function updateValiantBunnyPickups() {
+      if (!isValiant()) return;
+      for (let i = entities.valiantBunnies.length - 1; i >= 0; i--) {
+        const b = entities.valiantBunnies[i];
+        if (state.elapsed >= b.expiresAt) {
+          entities.valiantBunnies.splice(i, 1);
+          continue;
+        }
+        const slot = valiantFirstEmptySlot();
+        if (slot < 0) continue;
+        const rr = b.r + player.r;
+        if (distSq(b, player) <= rr * rr) {
+          const bonus = state.valiantSlotBonusMax[slot] ?? 0;
+          state.valiantRabbitSlots[slot] = { hp: VALIANT_RABBIT_BASE_HP + bonus, maxHp: VALIANT_RABBIT_BASE_HP + bonus };
+          entities.valiantBunnies.splice(i, 1);
+          spawnHealPopup(player.x, player.y - player.r - 10, "Saved", "#86efac", 0.65, 13);
+        }
+      }
+    }
+    function placeValiantShockField() {
+      const scale = valiantShockBoxScale();
+      const w = VALIANT_SHOCK_BOX_W * scale;
+      const h = VALIANT_SHOCK_BOX_H * scale;
+      const cx = player.x;
+      const cy = player.y;
+      entities.valiantElectricBoxes.push({
+        x: cx - w / 2,
+        y: cy - h / 2,
+        w,
+        h,
+        expiresAt: state.elapsed + VALIANT_SHOCK_BOX_DURATION_SEC
+      });
+      spawnAttackRing(cx, cy, Math.max(w, h) * 0.55, "#38bdf8", 0.28);
+      spawnAttackRing(cx, cy, Math.max(w, h) * 0.38, "#bae6fd", 0.22);
+    }
+    function drawValiantShockFields(ctx2) {
+      const t = state.elapsed;
+      for (const box of entities.valiantElectricBoxes) {
+        if (state.elapsed >= box.expiresAt) continue;
+        const { x, y, w, h } = box;
+        const cs = Math.min(28, w * 0.11, h * 0.11);
+        ctx2.save();
+        ctx2.fillStyle = "rgba(15, 23, 42, 0.94)";
+        ctx2.fillRect(x, y, cs, cs);
+        ctx2.fillRect(x + w - cs, y, cs, cs);
+        ctx2.fillRect(x + w - cs, y + h - cs, cs, cs);
+        ctx2.fillRect(x, y + h - cs, cs, cs);
+        const inset = cs * 0.32;
+        const ix = x + inset;
+        const iy = y + inset;
+        const iw = w - inset * 2;
+        const ih = h - inset * 2;
+        const flicker = 0.55 + 0.45 * Math.sin(t * 19 + x * 0.015);
+        ctx2.strokeStyle = `rgba(56, 189, 248, ${0.52 * flicker})`;
+        ctx2.lineWidth = 3.2;
+        ctx2.shadowColor = "rgba(56, 189, 248, 0.65)";
+        ctx2.shadowBlur = 16;
+        ctx2.setLineDash([8, 5]);
+        ctx2.lineDashOffset = -t * 52;
+        ctx2.strokeRect(ix, iy, iw, ih);
+        ctx2.setLineDash([]);
+        ctx2.shadowBlur = 0;
+        ctx2.strokeStyle = `rgba(147, 197, 253, ${0.45 + 0.4 * Math.sin(t * 24 + y * 0.018)})`;
+        ctx2.lineWidth = 1.4;
+        ctx2.beginPath();
+        const jx = 0.18 + 0.08 * Math.sin(t * 31);
+        ctx2.moveTo(ix + iw * jx, iy);
+        ctx2.lineTo(ix + iw * jx, iy + ih);
+        ctx2.moveTo(ix + iw * (1 - jx), iy);
+        ctx2.lineTo(ix + iw * (1 - jx), iy + ih);
+        ctx2.moveTo(ix, iy + ih * jx);
+        ctx2.lineTo(ix + iw, iy + ih * jx);
+        ctx2.moveTo(ix, iy + ih * (1 - jx));
+        ctx2.lineTo(ix + iw, iy + ih * (1 - jx));
+        ctx2.stroke();
+        ctx2.strokeStyle = `rgba(253, 224, 71, ${0.22 + 0.18 * flicker})`;
+        ctx2.lineWidth = 1;
+        ctx2.strokeRect(x + 1, y + 1, w - 2, h - 2);
+        ctx2.restore();
+      }
+    }
+    function spawnValiantRescueFx(x, y) {
+      if (!isValiant()) return;
+      entities.valiantRabbitFx.push({
+        kind: "rescue",
+        x,
+        y,
+        bornAt: state.elapsed,
+        expiresAt: state.elapsed + 0.92
+      });
+    }
+    function spawnValiantRabbitDeathFx(x, y) {
+      if (!isValiant()) return;
+      const n = 11;
+      const angles = [];
+      for (let i = 0; i < n; i++) angles.push(i / n * TAU + rand(-0.22, 0.22));
+      entities.valiantRabbitFx.push({
+        kind: "rabbitDeath",
+        x,
+        y,
+        angles,
+        bornAt: state.elapsed,
+        expiresAt: state.elapsed + 0.52
+      });
+    }
+    function drawValiantRabbitFx(ctx2) {
+      if (!isValiant()) return;
+      for (const fx of entities.valiantRabbitFx) {
+        const u = clamp((state.elapsed - fx.bornAt) / Math.max(1e-3, fx.expiresAt - fx.bornAt), 0, 1);
+        if (fx.kind === "rescue") {
+          const { x, y } = fx;
+          const riseEnd = 0.42;
+          if (u < riseEnd) {
+            const u1 = u / riseEnd;
+            ctx2.save();
+            const beamH = 22 + u1 * 118;
+            const grad = ctx2.createLinearGradient(x, y + 24, x, y - beamH);
+            grad.addColorStop(0, "rgba(254, 243, 199, 0)");
+            grad.addColorStop(0.28, "rgba(253, 224, 71, 0.28)");
+            grad.addColorStop(0.62, "rgba(255, 255, 255, 0.5)");
+            grad.addColorStop(1, "rgba(255, 255, 255, 0.12)");
+            ctx2.fillStyle = grad;
+            const wv = 11 + u1 * 16;
+            ctx2.beginPath();
+            ctx2.moveTo(x - wv * 0.5, y + 24);
+            ctx2.lineTo(x + wv * 0.5, y + 24);
+            ctx2.lineTo(x + wv * 0.2, y - beamH);
+            ctx2.lineTo(x - wv * 0.2, y - beamH);
+            ctx2.closePath();
+            ctx2.fill();
+            ctx2.fillStyle = `rgba(254, 252, 232, ${0.32 * (1 - u1 * 0.25)})`;
+            ctx2.fillRect(x - 3.5, y - beamH * u1, 7, beamH * u1 + 22);
+            const ry = y - 10 - 36 * u1;
+            const br = 5.5;
+            ctx2.fillStyle = "#fecdd3";
+            ctx2.beginPath();
+            ctx2.arc(x, ry, br, 0, TAU);
+            ctx2.fill();
+            ctx2.strokeStyle = "rgba(157, 23, 77, 0.78)";
+            ctx2.lineWidth = 1.15;
+            ctx2.stroke();
+            ctx2.restore();
+          } else {
+            const u2 = (u - riseEnd) / (1 - riseEnd);
+            const ease = u2 * u2;
+            const br = 5.5 * (1 - ease * 0.88);
+            const rx = x + 78 * ease * ease + Math.sin(u2 * Math.PI * 2.5) * 5;
+            const ry = y - 46 - 128 * ease - 18 * Math.sin(u2 * Math.PI);
+            const fade = 1 - ease;
+            ctx2.save();
+            ctx2.globalAlpha = 0.4 * fade;
+            ctx2.strokeStyle = "rgba(253, 230, 138, 0.95)";
+            ctx2.lineWidth = 2;
+            for (let k = 0; k < 5; k++) {
+              const lag = k * 0.07;
+              const lk = clamp(u2 - lag, 0, 1);
+              const sx = x + 62 * lk * lk;
+              const sy = y - 46 - 102 * lk * lk;
+              ctx2.beginPath();
+              ctx2.moveTo(rx, ry);
+              ctx2.lineTo(sx, sy);
+              ctx2.stroke();
+            }
+            ctx2.globalAlpha = fade;
+            ctx2.fillStyle = "#fecdd3";
+            ctx2.beginPath();
+            ctx2.arc(rx, ry, Math.max(1.5, br), 0, TAU);
+            ctx2.fill();
+            ctx2.strokeStyle = "rgba(251, 191, 36, 0.6)";
+            ctx2.lineWidth = 1.2;
+            ctx2.stroke();
+            ctx2.restore();
+          }
+        } else if (fx.kind === "rabbitDeath") {
+          const { x, y, angles } = fx;
+          const fade = (1 - u) * (1 - u);
+          const splurt = Math.sin(u * Math.PI);
+          ctx2.save();
+          ctx2.globalAlpha = 0.9 * fade;
+          for (let i = 0; i < angles.length; i++) {
+            const ang = angles[i];
+            const len = 7 + splurt * (24 + i % 4 * 5);
+            ctx2.strokeStyle = i % 2 === 0 ? "rgba(185, 28, 28, 0.95)" : "rgba(127, 29, 29, 0.88)";
+            ctx2.lineWidth = 1.8 + i % 3 * 0.45;
+            ctx2.beginPath();
+            ctx2.moveTo(x, y);
+            ctx2.lineTo(x + Math.cos(ang) * len, y + Math.sin(ang) * len);
+            ctx2.stroke();
+          }
+          ctx2.globalAlpha = 0.45 * (1 - u);
+          ctx2.fillStyle = "rgba(153, 27, 27, 0.9)";
+          ctx2.beginPath();
+          ctx2.ellipse(x, y + 3, 11 * (0.45 + u * 0.55), 5 * (0.4 + u * 0.35), 0, 0, TAU);
+          ctx2.fill();
+          ctx2.restore();
+        }
+      }
+    }
+    function startValiantRescueCooldownFromNow() {
+      if (!isValiant()) return;
+      const rescueCd = effectiveAbilityCooldown("decoy", VALIANT_RESCUE_COOLDOWN_SEC, 0.5);
+      state.valiantRescueReadyAt = state.elapsed + rescueCd;
+      abilities.decoy.nextReadyAt = state.elapsed + rescueCd;
+    }
+    function updateValiantRescueCooldownWhenNoRabbits() {
+      if (!isValiant() || !state.running) return;
+      if (valiantOccupiedRabbitCount() === 0) startValiantRescueCooldownFromNow();
+    }
+    function tryValiantRescueRabbit() {
+      if (state.elapsed < state.valiantRescueReadyAt || !state.running) return;
+      const slot = valiantLowestHpOccupiedSlot();
+      if (slot < 0) return;
+      const anchor = valiantRabbitAnchorWorld(slot);
+      state.valiantRabbitSlots[slot] = null;
+      startValiantRescueCooldownFromNow();
+      let willBump = VALIANT_RESCUE_WILL_RESTORE;
+      if (inventory.diamondEmpower === "valiantRescue" || diamondsOmniEmpowerActive()) willBump += VALIANT_DIAMOND_RESCUE_WILL_BONUS;
+      state.valiantWill = Math.min(1, state.valiantWill + willBump);
+      spawnValiantRescueFx(anchor.x, anchor.y);
+      spawnHealPopup(player.x, player.y - player.r - 12, "To safety", "#a5b4fc", 0.9, 14);
+      spawnAttackRing(player.x, player.y, player.r + 24, "#818cf8", 0.25);
     }
     function lunaticSprintDamageImmune() {
       if (!isLunatic()) return false;
@@ -4233,13 +4812,14 @@
     }
     function moveCircleWithCollisions(entity, vx, vy, dt, opts = {}) {
       const ignoreObstacles = !!opts.ignoreObstacles;
+      const blockValiantShock = !!opts.blockValiantEnemyShockFields;
       let touchedObstacle = false;
       const nx = { x: entity.x + vx * dt, y: entity.y, r: entity.r };
-      const nxBlocked = outOfBoundsCircle(nx) || !ignoreObstacles && collidesAnyObstacle(nx);
+      const nxBlocked = outOfBoundsCircle(nx) || !ignoreObstacles && collidesAnyObstacle(nx) || blockValiantShock && collidesValiantEnemyShockField(nx);
       if (!nxBlocked) entity.x = nx.x;
       else if (!ignoreObstacles) touchedObstacle = true;
       const ny = { x: entity.x, y: entity.y + vy * dt, r: entity.r };
-      const nyBlocked = outOfBoundsCircle(ny) || !ignoreObstacles && collidesAnyObstacle(ny);
+      const nyBlocked = outOfBoundsCircle(ny) || !ignoreObstacles && collidesAnyObstacle(ny) || blockValiantShock && collidesValiantEnemyShockField(ny);
       if (!nyBlocked) entity.y = ny.y;
       else if (!ignoreObstacles) touchedObstacle = true;
       return { touchedObstacle };
@@ -4389,6 +4969,9 @@
       if (selectedCharacter.id === "rogue") {
         return "Move: Arrows | Abilities: Q dash, W smoke bomb, E point to food | Pause: Space | Retry: R (character select)";
       }
+      if (selectedCharacter.id === "valiant") {
+        return "Move: Arrows | Abilities: Q Surge, W shock field (enemies), E Rescue, R Ultimate (Ace slot) | Pause: Space | Retry: R (character select)";
+      }
       if (selectedCharacter.id === "lunatic") {
         return "Move: Arrows (stumble) | Sprint: W \u2014 hold Q or Left to curve left, E or Right to curve right | R roar (sprint only) | Pause: Space | Retry: R (character select)";
       }
@@ -4409,6 +4992,7 @@
       const k = CHARACTERS.knight.abilities;
       const r = CHARACTERS.rogue.abilities;
       const l = CHARACTERS.lunatic.abilities;
+      const v = CHARACTERS.valiant.abilities;
       if (id === "knight") {
         return `
       <p class="character-detail-lead">The <strong>Knight</strong> is a sturdy all-rounder: forgiving HP and a simple rhythm for learning waves, spacing, and how the arena moves.</p>
@@ -4430,6 +5014,18 @@
         <li><strong>E \u2014 ${r.decoy.label}:</strong> for a short window, on-screen cues point toward nearby food\u2014use it when you are low and need to find the next bite fast.</li>
       </ul>
       <p class="character-detail-lead" style="margin-top:10px">The top-left <strong>Fed</strong> bar and the arcs around your hero show hunger and stealth grace. Pause: Space \xB7 Retry: R returns to character select.</p>
+    `;
+      }
+      if (id === "valiant") {
+        return `
+      <p class="character-detail-lead">The <strong>Valiant</strong> is a guardian robot: your body ignores HP damage, but <strong>Will to live</strong> drains when you are short on companions\u2014fastest with no rabbits, half pace with one, steady with two, and it slowly climbs again when all three slots are filled. <strong>Wild rabbits</strong> appear on the map as pickups\u2014walk over them to tuck one into the first free slot (left, right, back). Each rabbit has a few HP; when one dies, you lose a chunk of Will.</p>
+      <ul>
+        <li><strong>Q \u2014 ${v.dash.label}:</strong> short speed surge (like a classic burst)\u2014pair with Clubs for phase-through terrain while it is active.</li>
+        <li><strong>W \u2014 ${v.burst.label}:</strong> a large crackling perimeter with heavy corner posts; it only <strong>blocks enemies</strong> (you and projectiles pass through).</li>
+        <li><strong>E \u2014 ${v.decoy.label}:</strong> sends your <strong>lowest current HP</strong> equipped rabbit to safety, freeing its slot and restoring a large chunk of Will (about 40%; long cooldown). With no rabbits equipped, Rescue stays locked on full cooldown until you have at least one again. Diamonds can add extra Will on use.</li>
+        <li><strong>R \u2014 ${v.random.label}:</strong> same as other heroes\u2014the <strong>Ace</strong> in your rank deck sets which ultimate you get (shield ring, timelock, push waves, or vitality).</li>
+      </ul>
+      <p class="character-detail-lead" style="margin-top:10px">Hearts cards split bonus HP across rabbits; Spades face cards grant an extra shock-field charge. Pause: Space \xB7 Retry: R returns to character select.</p>
     `;
       }
       if (id === "lunatic") {
@@ -4641,6 +5237,10 @@
       player.y = 340;
       const spawnAxial = worldToHex(96, 340);
       state.lunaticHealExcludeHexKey = isLunatic() ? hexKey(spawnAxial.q, spawnAxial.r) : "";
+      state.valiantWill = 1;
+      state.valiantRabbitSlots = [null, null, null];
+      state.valiantNextBunnyAt = state.elapsed + 5;
+      state.valiantSlotBonusMax = [0, 0, 0];
       initSpecialHexTiles(spawnAxial.q, spawnAxial.r);
       if (rouletteModal) rouletteModal.hidden = true;
       if (forgeModal) forgeModal.hidden = true;
@@ -4680,6 +5280,9 @@
       entities.healPopups = [];
       entities.smokeZones = [];
       entities.foods = [];
+      entities.valiantBunnies = [];
+      entities.valiantElectricBoxes = [];
+      entities.valiantRabbitFx = [];
       entities.lunaticSprintTierFx = [];
       inventory.deckByRank = makeEmptyDeckByRank();
       inventory.backpackSlots = [null, null, null];
@@ -4690,6 +5293,7 @@
       inventory.clubsInvisUntil = 0;
       inventory.clubsPhaseThroughTerrain = false;
       inventory.rogueDiamondRangeBoost = false;
+      inventory.valiantElectricBoxChargeBonus = 0;
       inventory.heartsResistanceReadyAt = 0;
       inventory.heartsResistanceCooldownDuration = 0;
       inventory.heartsRegenBank = 0;
@@ -4707,7 +5311,11 @@
       dashState.maxCharges = 1;
       dashState.charges = 1;
       dashState.nextRechargeAt = 0;
+      valiantBoxChargeState.maxCharges = 1;
+      valiantBoxChargeState.charges = 1;
+      valiantBoxChargeState.nextRechargeAt = 0;
       recalcCardPassives();
+      if (isValiant()) startValiantRescueCooldownFromNow();
       ensureTilesForPlayer();
       cameraX = player.x - VIEW_W / 2;
       cameraY = player.y - VIEW_H / 2;
@@ -4716,6 +5324,7 @@
       renderCardModal();
     }
     function playerMissingHealth01() {
+      if (isValiant()) return clamp(1 - state.valiantWill, 0, 1);
       if (player.maxHp <= 0) return 0;
       return clamp(1 - player.hp / player.maxHp, 0, 1);
     }
@@ -4809,6 +5418,39 @@
       ctx2.strokeStyle = "rgba(251, 191, 36, 0.9)";
       ctx2.lineWidth = 1.2;
       ctx2.stroke();
+      ctx2.restore();
+    }
+    function drawValiantRabbitOrbiters(ctx2, alpha) {
+      if (!isValiant()) return;
+      ctx2.save();
+      ctx2.globalAlpha = alpha;
+      for (let slot = 0; slot < 3; slot++) {
+        const rb = state.valiantRabbitSlots[slot];
+        if (!rb) continue;
+        const { x: bx, y: by } = valiantRabbitAnchorWorld(slot);
+        const br = 5.5;
+        ctx2.fillStyle = "#fecdd3";
+        ctx2.beginPath();
+        ctx2.arc(bx, by, br, 0, TAU);
+        ctx2.fill();
+        ctx2.strokeStyle = "rgba(157, 23, 77, 0.8)";
+        ctx2.lineWidth = 1.2;
+        ctx2.stroke();
+        const ratio = rb.maxHp > 0 ? rb.hp / rb.maxHp : 0;
+        ctx2.fillStyle = "rgba(15, 23, 42, 0.55)";
+        ctx2.fillRect(bx - br, by + br + 2, br * 2, 2.5);
+        ctx2.fillStyle = ratio > 0.45 ? "#4ade80" : "#f87171";
+        ctx2.fillRect(bx - br, by + br + 2, br * 2 * ratio, 2.5);
+        const hpLabel = `${Math.round(rb.hp)}/${Math.round(rb.maxHp)}`;
+        ctx2.font = "bold 9px system-ui, sans-serif";
+        ctx2.textAlign = "center";
+        ctx2.textBaseline = "top";
+        ctx2.lineWidth = 3;
+        ctx2.strokeStyle = "rgba(15, 23, 42, 0.92)";
+        ctx2.strokeText(hpLabel, bx, by + br + 5);
+        ctx2.fillStyle = "#f8fafc";
+        ctx2.fillText(hpLabel, bx, by + br + 5);
+      }
       ctx2.restore();
     }
     function drawPlayerBody(ctx2, invulnAlpha) {
@@ -4997,6 +5639,24 @@
       }
     }
     function drawPlayerHpHud(ctx2) {
+      if (isValiant()) {
+        const px2 = player.x;
+        const py2 = player.y;
+        const pr2 = player.r;
+        const wPct = Math.round(state.valiantWill * 100);
+        ctx2.save();
+        ctx2.textAlign = "center";
+        ctx2.textBaseline = "bottom";
+        const yMain2 = py2 - pr2 - 10;
+        ctx2.font = "bold 14px ui-sans-serif, system-ui, Segoe UI, sans-serif";
+        ctx2.lineWidth = 4;
+        ctx2.strokeStyle = "rgba(2, 6, 23, 0.82)";
+        ctx2.strokeText(`Will ${wPct}%`, px2, yMain2);
+        ctx2.fillStyle = state.valiantWill <= 0.22 ? "#fca5a5" : "#e0e7ff";
+        ctx2.fillText(`Will ${wPct}%`, px2, yMain2);
+        ctx2.restore();
+        return;
+      }
       const px = player.x;
       const py = player.y;
       const pr = player.r;
@@ -5375,12 +6035,14 @@
     }
     function spawnCardPickup() {
       if (isLunatic()) return;
-      const point = randomOpenPoint(16, 96, { excludeArenaNexus: true });
+      const card = makeRandomCard();
+      const point = randomOpenPoint(CARD_PICKUP_HIT_R, 96, { excludeArenaNexus: true });
       entities.cards.push({
         x: point.x,
         y: point.y,
-        r: 16,
-        card: makeRandomCard(),
+        r: CARD_PICKUP_HIT_R,
+        card,
+        flipCard: makePickupFlipFace(card),
         bornAt: state.elapsed,
         expiresAt: state.elapsed + 12
       });
@@ -5528,8 +6190,8 @@
           entities.cards.splice(i, 1);
           continue;
         }
-        const rr = c.r + player.r;
-        if (distSq(c, player) <= rr * rr) {
+        const reach = c.r + player.r + CARD_PICKUP_REACH_EXTRA;
+        if (distSq(c, player) <= reach * reach) {
           openCardPickupModal(c.card);
           entities.cards.splice(i, 1);
           break;
@@ -5537,6 +6199,25 @@
       }
     }
     function tryDash() {
+      if (isValiant()) {
+        const ability2 = abilities.dash;
+        if (!state.running) return;
+        if (state.runLevelUpCinematic && performance.now() - state.runLevelUpCinematic.startMs < RUN_LEVEL_UP_CINEMATIC_MS)
+          return;
+        if (state.pausedForRoulette || state.pausedForSafehousePrompt || state.pausedForForge) return;
+        if (state.elapsed < ability2.nextReadyAt) return;
+        const cd = effectiveAbilityCooldown("dash", ability2.cooldown, ability2.minCooldown ?? 0.45);
+        ability2.nextReadyAt = state.elapsed + cd;
+        const burstDurBonus = knightDiamondBurstEmpowerActive() ? KNIGHT_DIAMOND_BURST_DURATION_BONUS_SEC : 0;
+        const dur = (abilities.dash.duration ?? abilities.burst.duration ?? 3) + burstDurBonus;
+        player.burstUntil = state.elapsed + dur;
+        if (passive.invisOnBurst > 0) {
+          inventory.clubsInvisUntil = Math.max(inventory.clubsInvisUntil, state.elapsed + passive.invisOnBurst);
+        }
+        spawnAttackRing(player.x, player.y, 58, "#38bdf8", 0.22);
+        spawnAttackRing(player.x, player.y, 88, "#7dd3fc", 0.18);
+        return;
+      }
       if (selectedCharacter.id === "lunatic") return;
       const ability = abilities.dash;
       if (!state.running) return;
@@ -5644,6 +6325,21 @@
         tryLunaticWToggle();
         return;
       }
+      if (isValiant()) {
+        if (!state.running) return;
+        if (valiantBoxChargeState.charges <= 0 && state.elapsed < ability.nextReadyAt) return;
+        if (valiantBoxChargeState.charges <= 0) return;
+        valiantBoxChargeState.charges -= 1;
+        if (valiantBoxChargeState.charges < valiantBoxChargeState.maxCharges) {
+          const cd = effectiveAbilityCooldown("burst", ability.cooldown, ability.minCooldown ?? 0.5);
+          valiantBoxChargeState.nextRechargeAt = Math.max(valiantBoxChargeState.nextRechargeAt, state.elapsed + cd);
+        }
+        if (valiantBoxChargeState.charges <= 0) {
+          ability.nextReadyAt = state.elapsed + effectiveAbilityCooldown("burst", ability.cooldown, ability.minCooldown ?? 0.5);
+        }
+        placeValiantShockField();
+        return;
+      }
       if (state.elapsed < ability.nextReadyAt || !state.running) return;
       if (selectedCharacter.id === "rogue") {
         ability.nextReadyAt = state.elapsed + effectiveAbilityCooldown("burst", ability.cooldown, ability.minCooldown ?? 1);
@@ -5668,6 +6364,10 @@
     }
     function tryDecoy() {
       if (selectedCharacter.id === "lunatic") return;
+      if (isValiant()) {
+        tryValiantRescueRabbit();
+        return;
+      }
       const ability = abilities.decoy;
       if (state.elapsed < ability.nextReadyAt || !state.running) return;
       if (selectedCharacter.id === "rogue") {
@@ -5788,7 +6488,7 @@
       }
       ability.ammo -= 1;
       ability.nextReadyAt = state.elapsed + ULTIMATE_ABILITY_COOLDOWN_SEC;
-      if (selectedCharacter.id === "knight" && countSuitsInActiveSlots().spades >= SET_BONUS_SUIT_THRESHOLD) {
+      if ((selectedCharacter.id === "knight" || selectedCharacter.id === "valiant") && countSuitsInActiveSlots().spades >= SET_BONUS_SUIT_THRESHOLD) {
         state.knightSpadesWorldSlowUntil = state.elapsed + KNIGHT_SPADES_WORLD_SLOW_SEC;
       }
     }
@@ -5914,7 +6614,9 @@
           const plen = Math.hypot(h.dir.x, h.dir.y) || 1;
           h.dir.x /= plen;
           h.dir.y /= plen;
-          moveCircleWithCollisions(h, h.dir.x * speed * 0.38, h.dir.y * speed * 0.38, spDt);
+          moveCircleWithCollisions(h, h.dir.x * speed * 0.38, h.dir.y * speed * 0.38, spDt, {
+            blockValiantEnemyShockFields: true
+          });
           continue;
         }
         let desired;
@@ -6054,7 +6756,7 @@
         const dlen = Math.hypot(h.dir.x, h.dir.y) || 1;
         h.dir.x /= dlen;
         h.dir.y /= dlen;
-        moveCircleWithCollisions(h, h.dir.x * speed, h.dir.y * speed, spDt);
+        moveCircleWithCollisions(h, h.dir.x * speed, h.dir.y * speed, spDt, { blockValiantEnemyShockFields: true });
       }
       for (const h of entities.hunters) {
         if (h.type === "spawner") continue;
@@ -6150,6 +6852,7 @@
       state.tempHpExpiry = 0;
     }
     function hitDecoyIfAny(source, range) {
+      const circ = { x: source.x, y: source.y, r: range };
       for (let i = entities.decoys.length - 1; i >= 0; i--) {
         const d = entities.decoys[i];
         const rr = range + d.r;
@@ -6185,6 +6888,10 @@
         }
       }
       if (amount <= 0) return;
+      if (isValiant()) {
+        valiantApplyDamage(amount, opts);
+        return;
+      }
       let rem = amount;
       if (state.tempHp > 0) {
         const absorbed = Math.min(rem, state.tempHp);
@@ -6346,6 +7053,18 @@
             player.maxHp += 1;
             player.hp = Math.min(player.maxHp, player.hp + 1);
             runLog.event(EVT_HEAL_PICKUP, "Crystal max HP +1", { hpAfter: player.hp, maxHp: player.maxHp });
+          } else if (isValiant()) {
+            const hurt = [];
+            for (let j = 0; j < 3; j++) {
+              const s = state.valiantRabbitSlots[j];
+              if (s && s.hp < s.maxHp) hurt.push(j);
+            }
+            if (hurt.length) {
+              const ri = hurt[Math.floor(Math.random() * hurt.length)];
+              const rb = state.valiantRabbitSlots[ri];
+              if (rb) rb.hp = Math.min(rb.maxHp, rb.hp + p.heal);
+              runLog.event(EVT_HEAL_PICKUP, "Heal cross to rabbit", { heal: p.heal, will: state.valiantWill });
+            }
           } else {
             player.hp = Math.min(player.maxHp, player.hp + p.heal);
             runLog.event(EVT_HEAL_PICKUP, "Picked up heal cross", { heal: p.heal, hpAfter: player.hp, maxHp: player.maxHp });
@@ -6355,14 +7074,20 @@
             const remaining = ability.nextReadyAt - state.elapsed;
             if (remaining > 0) ability.nextReadyAt = state.elapsed + remaining * refreshFactor;
           }
+          if (isValiant()) state.valiantRescueReadyAt = abilities.decoy.nextReadyAt;
           entities.pickups.splice(i, 1);
         }
       }
     }
     function cdr(ability) {
       if (ability === abilities.dash) {
+        if (isValiant()) return Math.max(0, abilities.dash.nextReadyAt - state.elapsed);
         if (dashState.charges >= dashState.maxCharges) return 0;
         return Math.max(0, dashState.nextRechargeAt - state.elapsed);
+      }
+      if (ability === abilities.burst && isValiant()) {
+        if (valiantBoxChargeState.charges >= valiantBoxChargeState.maxCharges) return 0;
+        return Math.max(0, valiantBoxChargeState.nextRechargeAt - state.elapsed);
       }
       return Math.max(0, ability.nextReadyAt - state.elapsed);
     }
@@ -6505,7 +7230,7 @@
       const enemiesFrozen = state.elapsed < state.playerHeadstartUntil;
       const timelockWorldFrozen = state.timelockEnemyUntil > state.elapsed && state.elapsed >= state.timelockEnemyFrom;
       const pauseHostiles = enemiesFrozen || timelockWorldFrozen;
-      const knightSpadesWorldSlowActive = selectedCharacter.id === "knight" && state.elapsed < state.knightSpadesWorldSlowUntil;
+      const knightSpadesWorldSlowActive = (selectedCharacter.id === "knight" || selectedCharacter.id === "valiant") && state.elapsed < state.knightSpadesWorldSlowUntil;
       const enemySimDt = knightSpadesWorldSlowActive ? simDt * KNIGHT_SPADES_WORLD_SLOW_MULT : simDt;
       state.hurtFlash = Math.max(0, state.hurtFlash - simDt);
       state.screenShakeStrength = Math.max(0, state.screenShakeStrength - simDt * 30);
@@ -6524,13 +7249,34 @@
       }
       if (state.tempHp > 0 && state.tempHpExpiry > 0 && state.elapsed >= state.tempHpExpiry) clearTempHp();
       if (inventory.heartsRegenPerSec > 0 && player.hp > 0) {
-        inventory.heartsRegenBank += inventory.heartsRegenPerSec * simDt;
-        while (inventory.heartsRegenBank >= 1 && player.hp < player.maxHp) {
-          inventory.heartsRegenBank -= 1;
-          player.hp = Math.min(player.maxHp, player.hp + 1);
-          spawnHealPopup(player.x, player.y - player.r - 8, "+1", "#86efac");
+        if (isValiant()) {
+          inventory.heartsRegenBank += inventory.heartsRegenPerSec * simDt;
+          while (inventory.heartsRegenBank >= 1) {
+            const hurt = [];
+            for (let i = 0; i < 3; i++) {
+              const s = state.valiantRabbitSlots[i];
+              if (s && s.hp < s.maxHp) hurt.push(i);
+            }
+            if (!hurt.length) {
+              inventory.heartsRegenBank = 0;
+              break;
+            }
+            const ri = hurt[Math.floor(Math.random() * hurt.length)];
+            const rb = state.valiantRabbitSlots[ri];
+            if (!rb) break;
+            inventory.heartsRegenBank -= 1;
+            rb.hp = Math.min(rb.maxHp, rb.hp + 1);
+            spawnHealPopup(player.x, player.y - player.r - 8, "+1 \u2665", "#fda4af");
+          }
+        } else {
+          inventory.heartsRegenBank += inventory.heartsRegenPerSec * simDt;
+          while (inventory.heartsRegenBank >= 1 && player.hp < player.maxHp) {
+            inventory.heartsRegenBank -= 1;
+            player.hp = Math.min(player.maxHp, player.hp + 1);
+            spawnHealPopup(player.x, player.y - player.r - 8, "+1", "#86efac");
+          }
+          if (player.hp >= player.maxHp) inventory.heartsRegenBank = 0;
         }
-        if (player.hp >= player.maxHp) inventory.heartsRegenBank = 0;
       }
       if (isLunatic() && player.hp > 0) {
         inventory.lunaticRegenBank += LUNATIC_PASSIVE_HP_PER_SEC * simDt;
@@ -6545,6 +7291,20 @@
         dashState.charges = dashState.maxCharges;
         dashState.nextRechargeAt = 0;
       }
+      if (isValiant()) {
+        if (valiantBoxChargeState.charges < valiantBoxChargeState.maxCharges && state.elapsed >= valiantBoxChargeState.nextRechargeAt) {
+          valiantBoxChargeState.charges = valiantBoxChargeState.maxCharges;
+          valiantBoxChargeState.nextRechargeAt = 0;
+        }
+        updateValiantWillDecay(simDt);
+      }
+      if (isValiant() && state.running && state.elapsed >= state.valiantNextBunnyAt) {
+        const lootScale = lootSpawnIntervalScale();
+        spawnValiantWildBunny();
+        state.valiantNextBunnyAt = state.elapsed + (VALIANT_BUNNY_SPAWN_INTERVAL + rand(-1.1, 2.4)) * lootScale;
+      }
+      if (isValiant()) updateValiantBunnyPickups();
+      if (isValiant()) updateValiantRescueCooldownWhenNoRabbits();
       ensureTilesForPlayer();
       const targetCameraX = player.x - VIEW_W / 2;
       const targetCameraY = player.y - VIEW_H / 2;
@@ -6589,6 +7349,12 @@
       for (let i = entities.healPopups.length - 1; i >= 0; i--) {
         if (state.elapsed >= entities.healPopups[i].expiresAt) entities.healPopups.splice(i, 1);
       }
+      for (let i = entities.valiantElectricBoxes.length - 1; i >= 0; i--) {
+        if (state.elapsed >= entities.valiantElectricBoxes[i].expiresAt) entities.valiantElectricBoxes.splice(i, 1);
+      }
+      for (let i = entities.valiantRabbitFx.length - 1; i >= 0; i--) {
+        if (state.elapsed >= entities.valiantRabbitFx[i].expiresAt) entities.valiantRabbitFx.splice(i, 1);
+      }
       for (let i = entities.smokeZones.length - 1; i >= 0; i--) {
         if (state.elapsed >= entities.smokeZones[i].expiresAt) entities.smokeZones.splice(i, 1);
       }
@@ -6621,7 +7387,7 @@
           mx = 0;
           my = 0;
         }
-        const burstSpeedLeg = inventory.diamondEmpower === "speedPassive" || diamondsOmniEmpowerActive() || state.elapsed < player.burstUntil;
+        const burstSpeedLeg = inventory.diamondEmpower === "speedPassive" || inventory.diamondEmpower === "valiantSpeed" || diamondsOmniEmpowerActive() || state.elapsed < player.burstUntil;
         const wBurstMult = burstSpeedLeg ? knightDiamondBurstEmpowerActive() ? KNIGHT_DIAMOND_BURST_SPEED_MULT : 2 : 1;
         const ultSpeedMult = state.elapsed < player.ultimateSpeedUntil ? 1.75 : 1;
         const terrainMult = state.elapsed < inventory.spadesObstacleBoostUntil ? 1 + passive.obstacleTouchMult : 1;
@@ -6709,6 +7475,32 @@
           ctx.fillStyle = "#93c5fd";
           ctx.fillText("Seeking", x, y + 31);
         }
+      }
+      if (isValiant()) {
+        const x = 14;
+        const y = 114;
+        const w = 160;
+        const h = 10;
+        const occ = valiantOccupiedRabbitCount();
+        const empty = 3 - occ;
+        const netPerSec = valiantWillNetChangePerSec();
+        ctx.fillStyle = "rgba(51, 65, 85, 0.9)";
+        ctx.fillRect(x, y, w, h);
+        ctx.fillStyle = state.valiantWill > 0.22 ? "#a5b4fc" : "#fb7185";
+        ctx.fillRect(x, y, w * clamp(state.valiantWill, 0, 1), h);
+        ctx.strokeStyle = "rgba(148, 163, 184, 0.6)";
+        ctx.lineWidth = 1;
+        ctx.strokeRect(x - 0.5, y - 0.5, w + 1, h + 1);
+        ctx.fillStyle = "#e0e7ff";
+        ctx.fillText(`Will ${(state.valiantWill * 100).toFixed(0)}%`, x, y + 14);
+        ctx.font = "12px Arial";
+        ctx.fillStyle = "#94a3b8";
+        ctx.fillText(
+          `Rabbits: ${occ}/3 (${empty} empty) \u2014 ${netPerSec >= 0 ? "+" : ""}${netPerSec.toFixed(3)} Will/s`,
+          x,
+          y + 30
+        );
+        ctx.font = "15px Arial";
       }
     }
     function drawRogueSurvivalHud(ctx2) {
@@ -6836,6 +7628,89 @@ Stop ${fmt(info.lunaticStopCdRem)}`;
             valueEl.classList.remove("ability-value--lunatic-w");
             valueEl.textContent = info.extra;
           }
+          slot.style.borderColor = info.color;
+        }
+        return;
+      }
+      if (isValiant()) {
+        const dashReduction2 = Math.max(0, passive.cooldownFlat.dash || 0);
+        const burstReduction2 = Math.max(0, passive.cooldownFlat.burst || 0);
+        const decoyReduction2 = Math.max(0, passive.cooldownFlat.decoy || 0);
+        const dashPct2 = Math.max(0, passive.cooldownPct.dash || 0);
+        const burstPct2 = Math.max(0, passive.cooldownPct.burst || 0);
+        const decoyPct2 = Math.max(0, passive.cooldownPct.decoy || 0);
+        const cdrSuffix2 = (base, reduction) => {
+          if (!(reduction > 1e-3) || !(base > 1e-3)) return "";
+          const pct = Math.round(reduction / base * 100);
+          return ` -${reduction.toFixed(1)}s -${pct}%`;
+        };
+        const cdrPctSuffix2 = (pct) => pct > 1e-3 ? ` -${Math.round(pct * 100)}%` : "";
+        const rescueRem = Math.max(0, state.valiantRescueReadyAt - state.elapsed);
+        const rescueDur = effectiveAbilityCooldown("decoy", VALIANT_RESCUE_COOLDOWN_SEC, 0.5);
+        const abilitiesUi2 = [
+          {
+            key: abilities.dash.key.toUpperCase(),
+            label: `${abilities.dash.label}` + (dashPct2 > 1e-3 ? cdrPctSuffix2(dashPct2) : cdrSuffix2(abilities.dash.cooldown, dashReduction2)),
+            color: "#38bdf8",
+            remaining: cdr(abilities.dash),
+            duration: effectiveAbilityCooldown("dash", abilities.dash.cooldown, abilities.dash.minCooldown ?? 0.45),
+            extra: ""
+          },
+          {
+            key: abilities.burst.key.toUpperCase(),
+            label: `${abilities.burst.label}` + (burstPct2 > 1e-3 ? cdrPctSuffix2(burstPct2) : cdrSuffix2(abilities.burst.cooldown, burstReduction2)),
+            color: "#22d3ee",
+            remaining: cdr(abilities.burst),
+            duration: effectiveAbilityCooldown("burst", abilities.burst.cooldown, abilities.burst.minCooldown ?? 0.5),
+            extra: `${valiantBoxChargeState.charges}/${valiantBoxChargeState.maxCharges}`
+          },
+          {
+            key: abilities.decoy.key.toUpperCase(),
+            label: `${abilities.decoy.label}` + (decoyPct2 > 1e-3 ? cdrPctSuffix2(decoyPct2) : cdrSuffix2(VALIANT_RESCUE_COOLDOWN_SEC, decoyReduction2)),
+            color: "#a78bfa",
+            remaining: rescueRem,
+            duration: rescueDur,
+            extra: ""
+          },
+          (() => {
+            const ult = abilities.random;
+            const type = ult.type;
+            const hasAbility = !!type;
+            const displayName = type === "burst" ? "Push" : hasAbility ? type[0].toUpperCase() + type.slice(1) : "None";
+            const cdRem = hasAbility ? Math.max(0, ult.nextReadyAt - state.elapsed) : 0;
+            const ready = hasAbility && ult.ammo > 0 && cdRem <= 1e-3;
+            let color = "#64748b";
+            if (type === "shield") color = "#60a5fa";
+            if (type === "burst") color = "#fde68a";
+            if (type === "timelock") color = "#c084fc";
+            if (type === "heal") color = "#4ade80";
+            return {
+              key: ult.key.toUpperCase(),
+              label: displayName,
+              color,
+              remaining: ready ? 0 : hasAbility ? cdRem : 0,
+              duration: hasAbility ? ULTIMATE_ABILITY_COOLDOWN_SEC : 1,
+              extra: hasAbility ? `${ult.ammo}/${ult.maxAmmo}` : "0/0"
+            };
+          })()
+        ];
+        for (let i = 0; i < abilitiesUi2.length; i++) {
+          const info = abilitiesUi2[i];
+          const slot = abilitySlots[i];
+          if (!slot) continue;
+          const fill = slot.querySelector(".ability-fill");
+          const keyEl = slot.querySelector(".ability-key");
+          const labelEl = slot.querySelector(".ability-label");
+          const valueEl = slot.querySelector(".ability-value");
+          if (!fill || !keyEl || !labelEl || !valueEl) continue;
+          const cooldownProgress = clamp(1 - info.remaining / Math.max(1e-3, info.duration), 0, 1);
+          fill.style.width = `${Math.round(cooldownProgress * 100)}%`;
+          fill.style.background = info.color;
+          fill.style.opacity = String(0.2 + cooldownProgress * 0.75);
+          keyEl.textContent = info.key;
+          labelEl.textContent = info.label;
+          valueEl.classList.remove("ability-value--lunatic-w");
+          valueEl.textContent = info.extra;
           slot.style.borderColor = info.color;
         }
         return;
@@ -7171,6 +8046,20 @@ Stop ${fmt(info.lunaticStopCdRem)}`;
         ctx.arc(smoke.x, smoke.y, smoke.r, 0, TAU);
         ctx.stroke();
       }
+      drawValiantShockFields(ctx);
+      for (const bn of entities.valiantBunnies) {
+        if (state.elapsed >= bn.expiresAt) continue;
+        const { x, y, r } = bn;
+        ctx.fillStyle = "#fecdd3";
+        ctx.beginPath();
+        ctx.ellipse(x, y + r * 0.08, r * 0.82, r * 0.68, 0, 0, TAU);
+        ctx.fill();
+        ctx.fillStyle = "#fb7185";
+        ctx.beginPath();
+        ctx.ellipse(x - r * 0.55, y - r * 0.42, r * 0.28, r * 0.5, -0.4, 0, TAU);
+        ctx.ellipse(x + r * 0.55, y - r * 0.42, r * 0.28, r * 0.5, 0.4, 0, TAU);
+        ctx.fill();
+      }
       for (const food of entities.foods) {
         const lifeTotal = Math.max(1e-3, food.expiresAt - food.bornAt);
         const lifeLeft = clamp((food.expiresAt - state.elapsed) / lifeTotal, 0, 1);
@@ -7223,27 +8112,7 @@ Stop ${fmt(info.lunaticStopCdRem)}`;
         ctx.fillStyle = lifeLeft > 0.35 ? "#22c55e" : "#ef4444";
         ctx.fillRect(bx, by, barW * lifeLeft, barH);
       }
-      for (const c of entities.cards) {
-        const bob = Math.sin((state.elapsed - c.bornAt) * 5) * 2;
-        const w = 20;
-        const h = 28;
-        ctx.save();
-        ctx.translate(c.x, c.y + bob);
-        ctx.fillStyle = "#1d4ed8";
-        ctx.fillRect(-w / 2, -h / 2, w, h);
-        ctx.strokeStyle = "#bfdbfe";
-        ctx.lineWidth = 2;
-        ctx.strokeRect(-w / 2, -h / 2, w, h);
-        ctx.strokeStyle = "rgba(191,219,254,0.8)";
-        ctx.lineWidth = 1;
-        ctx.beginPath();
-        ctx.moveTo(-w / 2 + 4, -h / 2 + 4);
-        ctx.lineTo(w / 2 - 4, h / 2 - 4);
-        ctx.moveTo(w / 2 - 4, -h / 2 + 4);
-        ctx.lineTo(-w / 2 + 4, h / 2 - 4);
-        ctx.stroke();
-        ctx.restore();
-      }
+      for (const c of entities.cards) drawCardPickupWorld(ctx, c, state.elapsed);
       for (const d of entities.decoys) drawDecoyBody(ctx, d);
       for (const zone of entities.dangerZones) {
         const zu = zone.windup != null ? zone.windup : 0.8;
@@ -7553,12 +8422,14 @@ Stop ${fmt(info.lunaticStopCdRem)}`;
       }
       drawLunaticSprintTierSpeedFx(ctx);
       let playerBodyAlpha = state.elapsed < state.playerInvulnerableUntil ? 0.45 + 0.4 * (0.5 + 0.5 * Math.sin(state.elapsed * 32)) : 1;
-      if (selectedCharacter.id === "knight" && state.elapsed < inventory.clubsInvisUntil) {
+      if ((selectedCharacter.id === "knight" || selectedCharacter.id === "valiant") && state.elapsed < inventory.clubsInvisUntil) {
         const pulse = 0.5 + 0.5 * Math.sin(state.elapsed * 12);
         const ghostAlpha = clamp(0.34 + 0.16 * pulse, 0.28, 0.52);
         playerBodyAlpha = Math.min(playerBodyAlpha, ghostAlpha);
       }
       drawPlayerBody(ctx, playerBodyAlpha);
+      drawValiantRabbitOrbiters(ctx, playerBodyAlpha);
+      drawValiantRabbitFx(ctx);
       drawLunaticSprintDirectionArrow(ctx);
       drawLunaticRoarFx(ctx, playerBodyAlpha);
       drawLunaticRoarTimerBar(ctx, playerBodyAlpha);

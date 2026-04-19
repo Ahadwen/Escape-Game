@@ -3,6 +3,10 @@ export const TILE_W = 560;
 export const BLOCK = 35;
 export const CAMERA_PAN_SPEED = 900;
 export const HEAL_PICKUP_HIT_R = 24;
+/** Map card pickup: collision radius in world px. */
+export const CARD_PICKUP_HIT_R = 20;
+/** Extra reach beyond `card.r + player.r` when collecting a map card. */
+export const CARD_PICKUP_REACH_EXTRA = 10;
 export const HEAL_PICKUP_PLUS_HALF = 13;
 export const HEAL_PICKUP_ARM_THICK = 6;
 export const SNIPER_ARTILLERY_WINDUP = 1.38;

@@ -121,7 +121,49 @@ export const CHARACTERS = {
       random: { key: "r", label: "Roar" },
     },
   },
+  valiant: {
+    id: "valiant",
+    name: "The Valiant",
+    /** Robot body: no personal HP pool; rabbits + Will track survival. */
+    baseHp: 1,
+    cooldownAbilityIds: ["dash", "burst", "decoy"],
+    abilities: {
+      dash: { key: "q", label: "Surge", cooldown: 5, minCooldown: 0.45, duration: 3 },
+      burst: { key: "w", label: "Shock field", cooldown: 6.5, minCooldown: 0.5, duration: 0 },
+      decoy: { key: "e", label: "Rescue", cooldown: 25, minCooldown: 0.5 },
+      random: { key: "r", label: "Ultimate" },
+    },
+  },
 };
+
+/** Valiant: HP per equipped / rescued rabbit. */
+export const VALIANT_RABBIT_BASE_HP = 4;
+/** Valiant E: seconds between Rescue uses. */
+export const VALIANT_RESCUE_COOLDOWN_SEC = 25;
+/** Valiant E: Will restored (0–1) when Rescue sends a rabbit to safety. */
+export const VALIANT_RESCUE_WILL_RESTORE = 0.4;
+/** Valiant: Will lost when a rabbit dies from damage. */
+export const VALIANT_WILL_RABBIT_DEATH_COST = 0.25;
+/**
+ * Valiant: base scale for Will drain with **no** rabbits equipped.
+ * Actual drain with 0 rabbits is `3 * this` per second; with 1 rabbit, half that; with 2, none; with 3, see regen constant.
+ */
+export const VALIANT_WILL_DECAY_PER_EMPTY_SLOT = 0.007;
+/** Valiant: with three rabbits equipped, Will rises per second (capped at 1). */
+export const VALIANT_WILL_REGEN_PER_SEC_THREE_RABBITS = 0.003;
+/** Valiant W: shock field size (world px); blocks enemies only. */
+export const VALIANT_SHOCK_BOX_W = 168;
+export const VALIANT_SHOCK_BOX_H = 120;
+/** Valiant W: how long the shock field persists (blocks enemy movement only). */
+export const VALIANT_SHOCK_BOX_DURATION_SEC = 4.6;
+/** Valiant: world bunny pickup radius. */
+export const VALIANT_BUNNY_PICKUP_R = 12;
+/** Valiant: base seconds between wild bunny spawns (scaled like food). */
+export const VALIANT_BUNNY_SPAWN_INTERVAL = 7.2;
+/** Diamond empower: extra Will restored when using Rescue (fraction). */
+export const VALIANT_DIAMOND_RESCUE_WILL_BONUS = 0.12;
+/** Diamond empower: shock box width/height scale. */
+export const VALIANT_DIAMOND_BOX_SCALE = 1.32;
 
 /** Lunatic passive: HP/sec (hearts set bonus uses 0.3 at threshold). */
 export const LUNATIC_PASSIVE_HP_PER_SEC = 0.28;

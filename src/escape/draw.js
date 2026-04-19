@@ -252,3 +252,112 @@ export function drawForgeHexCell(ctx, cx, cy, vertexRadius, elapsed, spentLook =
   ctx.fill();
   ctx.restore();
 }
+
+const CARD_PICKUP_SUIT_GLYPH = {
+  hearts: "\u2665",
+  diamonds: "\u2666",
+  clubs: "\u2663",
+  spades: "\u2660",
+};
+
+function cardPickupRankLabel(rank) {
+  if (rank === 1) return "A";
+  if (rank === 11) return "J";
+  if (rank === 12) return "Q";
+  if (rank === 13) return "K";
+  return String(rank);
+}
+
+function cardPickupSuitPalette(suit) {
+  /** Red suits (hearts + diamonds): rank and pips read in red on the light pickup face. */
+  if (suit === "hearts") return { ink: "#b91c1c", fill: "#fff1f2", rim: "rgba(185, 28, 28, 0.45)" };
+  if (suit === "diamonds") return { ink: "#b91c1c", fill: "#fff5f5", rim: "rgba(185, 28, 28, 0.42)" };
+  if (suit === "clubs") return { ink: "#166534", fill: "#f0fdf4", rim: "rgba(22, 101, 52, 0.45)" };
+  return { ink: "#0f172a", fill: "#f8fafc", rim: "rgba(15, 23, 42, 0.4)" };
+}
+
+function drawCardPickupMiniFace(ctx, card, w, h) {
+  const { ink, fill, rim } = cardPickupSuitPalette(card.suit);
+  const glyph = CARD_PICKUP_SUIT_GLYPH[card.suit] ?? "?";
+  const hw = w / 2;
+  const hh = h / 2;
+  ctx.save();
+  ctx.shadowColor = "rgba(15, 23, 42, 0.35)";
+  ctx.shadowBlur = 10;
+  ctx.shadowOffsetY = 2;
+  ctx.fillStyle = fill;
+  ctx.fillRect(-hw, -hh, w, h);
+  ctx.shadowBlur = 0;
+  ctx.shadowOffsetY = 0;
+  ctx.strokeStyle = rim;
+  ctx.lineWidth = 2;
+  ctx.strokeRect(-hw + 1, -hh + 1, w - 2, h - 2);
+  ctx.fillStyle = ink;
+  ctx.font = "bold 11px ui-sans-serif, system-ui, sans-serif";
+  ctx.textAlign = "left";
+  ctx.textBaseline = "top";
+  ctx.fillText(`${cardPickupRankLabel(card.rank)}${glyph}`, -hw + 4, -hh + 3);
+  ctx.font = "bold 20px ui-serif, Georgia, 'Times New Roman', serif";
+  ctx.textAlign = "center";
+  ctx.textBaseline = "middle";
+  ctx.fillText(glyph, 0, 1);
+  ctx.restore();
+}
+
+/**
+ * World map card loot: soft spotlight, pulse ring, and a flipping mini card (two faces).
+ * `pickup.card` is the real reward; `pickup.flipCard` is optional decor-only second face.
+ */
+export function drawCardPickupWorld(ctx, pickup, elapsed) {
+  const born = pickup.bornAt ?? elapsed;
+  const bob = Math.sin((elapsed - born) * 4.2) * 2.2;
+  const cx = pickup.x;
+  const cy = pickup.y + bob;
+  const flipT = (elapsed - born) * 2.35;
+  const cos = Math.cos(flipT);
+  const scaleX = Math.max(0.11, Math.abs(cos));
+  const face = cos >= 0 ? pickup.card : pickup.flipCard ?? pickup.card;
+  const w = 28;
+  const h = 38;
+  const spotR = Math.max(48, (pickup.r ?? 20) * 2.6);
+
+  ctx.save();
+  ctx.translate(cx, cy);
+
+  const g0 = ctx.createRadialGradient(0, 0, 0, 0, 0, spotR);
+  g0.addColorStop(0, "rgba(254, 252, 232, 0.42)");
+  g0.addColorStop(0.35, "rgba(251, 191, 36, 0.14)");
+  g0.addColorStop(0.65, "rgba(59, 130, 246, 0.06)");
+  g0.addColorStop(1, "rgba(15, 23, 42, 0)");
+  ctx.fillStyle = g0;
+  ctx.beginPath();
+  ctx.arc(0, 0, spotR, 0, TAU);
+  ctx.fill();
+
+  const ringPulse = 0.5 + 0.5 * Math.sin(elapsed * 3.1 + born * 0.7);
+  const ringR = (pickup.r ?? 20) + 10 + ringPulse * 5;
+  ctx.strokeStyle = `rgba(255, 255, 255, ${0.22 + 0.18 * ringPulse})`;
+  ctx.lineWidth = 1.5;
+  ctx.beginPath();
+  ctx.arc(0, 0, ringR, 0, TAU);
+  ctx.stroke();
+  ctx.strokeStyle = `rgba(251, 191, 36, ${0.12 + 0.1 * ringPulse})`;
+  ctx.lineWidth = 2.5;
+  ctx.beginPath();
+  ctx.arc(0, 0, ringR + 3, 0, TAU);
+  ctx.stroke();
+
+  ctx.scale(scaleX, 1);
+  if (scaleX < 0.2) {
+    ctx.strokeStyle = "rgba(248, 250, 252, 0.85)";
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.moveTo(0, -h * 0.55);
+    ctx.lineTo(0, h * 0.55);
+    ctx.stroke();
+  } else {
+    drawCardPickupMiniFace(ctx, face, w, h);
+  }
+
+  ctx.restore();
+}
